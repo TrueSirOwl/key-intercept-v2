@@ -37,6 +37,7 @@ type Rule = {
 
 type RuleGroup = {
     id: number;
+    name: string;
     timeout_end: string;
     enabled: boolean;
     order: number;
@@ -273,6 +274,7 @@ function mergeLocalConfig(raw: unknown): LocalConfig {
             const fallbackTimeout = typeof group.disabled_at === "string" ? group.disabled_at : farFuture;
             return {
                 id: parseNumericInput(String(group.id ?? index + 1), index + 1, { min: 1 }),
+                name: typeof group.name === "string" ? group.name : `Group ${index + 1}`,
                 timeout_end: typeof group.timeout_end === "string" ? group.timeout_end : fallbackTimeout,
                 enabled: group.enabled === undefined
                     ? (typeof group.disabled_at === "string" ? Date.parse(group.disabled_at) > Date.now() : true)
@@ -1425,6 +1427,39 @@ function buildScopeTargetFromContext(props: any): ScopeTarget | null {
     return selectedTarget;
 }
 
+// Safe localStorage helpers to prevent crashes in sandboxed/extension environments
+const getSavedSectionState = (): Record<string, boolean> => {
+    const defaults: Record<string, boolean> = {
+        gag: false,
+        pet: false,
+        bimbo: false,
+        horny: false,
+        drone: false,
+        uwu: false,
+        censored: false,
+        scope: false,
+        rules: false,
+        editors: false
+    };
+    try {
+        const saved = localStorage.getItem("key_intercept_open_sections");
+        if (saved) {
+            return { ...defaults, ...JSON.parse(saved) };
+        }
+    } catch (e) {
+        console.warn("Failed to read section states from localStorage", e);
+    }
+    return defaults;
+};
+
+const saveSectionState = (sections: Record<string, boolean>) => {
+    try {
+        localStorage.setItem("key_intercept_open_sections", JSON.stringify(sections));
+    } catch (e) {
+        console.warn("Failed to write section states to localStorage", e);
+    }
+};
+
 function ConfigPanel(props: any) {
     const activeUserId = currentUser().id;
     const profileUserId = getProfileUserId(props) ?? activeUserId;
@@ -1446,10 +1481,45 @@ function ConfigPanel(props: any) {
     const [isRulesEditorOpen, setIsRulesEditorOpen] = React.useState(false);
     const [nowMs, setNowMs] = React.useState(() => Date.now());
     const [canViewRemote, setCanViewRemote] = React.useState(isOwnProfile);
+
+    // Root panel collapse state
+    const [isPanelCollapsed, setIsPanelCollapsed] = React.useState(() => {
+        try {
+            return localStorage.getItem("key_intercept_panel_collapsed") === "true";
+        } catch {
+            return false;
+        }
+    });
+
+    // Sync changes to localStorage whenever the user toggles the panel
+    React.useEffect(() => {
+        try {
+            localStorage.setItem("key_intercept_panel_collapsed", String(isPanelCollapsed));
+        } catch (e) {
+            console.error("Failed to save panel collapse state", e);
+        }
+    }, [isPanelCollapsed]);
+
+    // Persistent open sections tracker
+    const [openSections, setOpenSections] = React.useState<Record<string, boolean>>(() => getSavedSectionState());
+
+    // Sync section state changes to localStorage
+    React.useEffect(() => {
+        saveSectionState(openSections);
+    }, [openSections]);
+
+    const toggleSection = (section: string) => {
+        setOpenSections(prev => ({
+            ...prev,
+            [section]: !prev[section]
+        }));
+    };
+
     const skipAutosaveRef = React.useRef(true);
     const lastSavedSnapshotRef = React.useRef("");
     const saveQueueRef = React.useRef(Promise.resolve());
     const refreshInFlightRef = React.useRef(false);
+
     const stopKeyPropagation = React.useCallback((event: React.KeyboardEvent) => {
         event.stopPropagation();
     }, []);
@@ -1461,7 +1531,8 @@ function ConfigPanel(props: any) {
         background: "#2b2d31",
         border: "1px solid #3f4147",
         borderRadius: "12px",
-        padding: "12px"
+        padding: "12px",
+        overflow: "hidden"
     };
     const inputStyle: React.CSSProperties = {
         width: "100%",
@@ -1469,7 +1540,8 @@ function ConfigPanel(props: any) {
         border: "1px solid #3f4147",
         background: "#1e1f22",
         color: "#f2f3f5",
-        padding: "8px"
+        padding: "8px",
+        boxSizing: "border-box"
     };
     const buttonStyle: React.CSSProperties = {
         borderRadius: "8px",
@@ -1480,8 +1552,17 @@ function ConfigPanel(props: any) {
         cursor: "pointer"
     };
     const sectionHeaderStyle: React.CSSProperties = {
-        margin: 0,
-        fontSize: "16px"
+        margin: "-12px",
+        padding: "12px",
+        fontSize: "16px",
+        fontWeight: 600,
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        cursor: "pointer",
+        userSelect: "none",
+        width: "calc(100% + 24px)",
+        boxSizing: "border-box"
     };
 
     const updateFromConfig = React.useCallback((config: LocalConfig) => {
@@ -1785,6 +1866,15 @@ function ConfigPanel(props: any) {
         </div>
     );
 
+    const renderHeader = (title: string, sectionKey: string) => (
+        <div style={sectionHeaderStyle} onClick={() => toggleSection(sectionKey)}>
+            <span>{title}</span>
+            <span style={{ fontSize: "12px", color: "#b5bac1", transform: openSections[sectionKey] ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s ease" }}>
+                ▼
+            </span>
+        </div>
+    );
+
     return (
         <div
             style={{ width: "100%", maxWidth: "760px", margin: "0 auto", color: "#f2f3f5", background: "#313338", border: "1px solid #3f4147", borderRadius: "16px", padding: "16px", display: "grid", gap: "12px" }}
@@ -1793,440 +1883,553 @@ function ConfigPanel(props: any) {
             onMouseDown={stopMousePropagation}
             onClick={stopMousePropagation}
         >
-            <div style={{ ...sectionStyle, background: "#2b2d31" }}>
-                <h3 style={{ margin: 0 }}>key-intercept control center</h3>
+            {/* Root Header Block */}
+            <div
+                style={{ ...sectionStyle, background: "#2b2d31", cursor: "pointer", userSelect: "none" }}
+                onClick={() => setIsPanelCollapsed(prev => !prev)}
+            >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <h3 style={{ margin: 0 }}>key-intercept control center</h3>
+                    <span style={{ fontSize: "12px", color: "#b5bac1", transform: isPanelCollapsed ? "rotate(0deg)" : "rotate(180deg)", transition: "transform 0.2s ease" }}>
+                        ▼
+                    </span>
+                </div>
                 <p style={{ margin: "6px 0 0 0", color: "#b5bac1" }}>
                     {isOwnProfile ? "Your profile configuration" : `Viewing profile ${profileUserId}`}
                 </p>
+                {status && (
+                    <p style={{ margin: "6px 0 0 0", color: "#5865f2", fontSize: "14px" }}>
+                        {status}
+                    </p>
+                )}
             </div>
 
-            {!isOwnProfile && !canViewRemote && (
-                <div style={sectionStyle}>
-                    <p style={{ marginTop: 0 }}>You do not currently have permission to view this profile config.</p>
-                    <button
-                        style={buttonStyle}
-                        onClick={async () => {
-                            try {
-                                await requestRemoteAccess(settings.store.relayUrl, activeUserId, profileUserId);
-                                setStatus(`Requested config access from ${profileUserId}`);
-                            } catch (err) {
-                                setStatus(formatConfigAccessError(err, profileUserId));
-                            }
-                        }}
-                    >
-                        Request Access
-                    </button>
-                </div>
-            )}
-
-            {(isOwnProfile || canViewRemote) && (
+            {/* Collapsible Main Container */}
+            {!isPanelCollapsed && (
                 <>
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Gag</h4>
-                        <div style={{ marginTop: "8px" }}>{renderTimeoutControls("gag_end", "Gag timeout")}</div>
-                    </div>
-
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Pet</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
-                            {renderTimeoutControls("pet_end", "Pet timeout")}
-                            <label>
-                                Pet type
-                                <select
-                                    style={inputStyle}
-                                    value={petTypeOptions.some(option => option.value === editableConfig.config.pet_type) ? editableConfig.config.pet_type : petTypeOptions[0].value}
-                                    onChange={e => {
-                                        const nextValue = Number(e.currentTarget.value);
-                                        setEditableConfig(prev => ({
-                                            ...prev,
-                                            config: {
-                                                ...prev.config,
-                                                pet_type: nextValue
-                                            }
-                                        }));
-                                    }}
-                                >
-                                    {petTypeOptions.map(option => (
-                                        <option key={option.value} value={option.value}>{option.label}</option>
-                                    ))}
-                                </select>
-                            </label>
-                            <label>
-                                Pet amount ({Math.round(editableConfig.config.pet_amount * 100)}%)
-                                <input
-                                    style={inputStyle}
-                                    type="range"
-                                    min={0}
-                                    max={100}
-                                    step={1}
-                                    value={Math.round(editableConfig.config.pet_amount * 100)}
-                                    onChange={e => {
-                                        const nextValue = parseNumericInput(e.currentTarget.value, 100, { min: 0, max: 100 });
-                                        setEditableConfig(prev => ({
-                                            ...prev,
-                                            config: {
-                                                ...prev.config,
-                                                pet_amount: nextValue / 100
-                                            }
-                                        }));
-                                    }}
-                                />
-                            </label>
-                        </div>
-                    </div>
-
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Bimbo</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
-                            {renderTimeoutControls("bimbo_end", "Bimbo timeout")}
-                            <label>Bimbo word length<input style={inputStyle} type="number" min={1} value={editableConfig.config.bimbo_word_length} onChange={e => {
-                                const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, config: { ...prev.config, bimbo_word_length: parseNumericInput(nextValue, prev.config.bimbo_word_length, { min: 1 }) } }));
-                            }} /></label>
-                        </div>
-                    </div>
-
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Horny</h4>
-                        <div style={{ marginTop: "8px" }}>{renderTimeoutControls("horny_end", "Horny timeout")}</div>
-                    </div>
-
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Drone</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
-                            {renderTimeoutControls("drone_end", "Drone timeout")}
-                            <label>Drone term<input style={inputStyle} value={editableConfig.drone_config.drone_term} onChange={e => {
-                                const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, drone_term: nextValue } }));
-                            }} /></label>
-                            <label>Drone speech header<input style={inputStyle} value={editableConfig.drone_config.speech_header} onChange={e => {
-                                const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, speech_header: nextValue } }));
-                            }} /></label>
-                            <label>Drone speech footer<input style={inputStyle} value={editableConfig.drone_config.speech_footer} onChange={e => {
-                                const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, speech_footer: nextValue } }));
-                            }} /></label>
-                            <label>Drone action header<input style={inputStyle} value={editableConfig.drone_config.action_header} onChange={e => {
-                                const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, action_header: nextValue } }));
-                            }} /></label>
-                            <label>Drone action footer<input style={inputStyle} value={editableConfig.drone_config.action_footer} onChange={e => {
-                                const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, action_footer: nextValue } }));
-                            }} /></label>
-                            <label>Drone whisper header<input style={inputStyle} value={editableConfig.drone_config.whisper_header} onChange={e => {
-                                const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, whisper_header: nextValue } }));
-                            }} /></label>
-                            <label>Drone whisper footer<input style={inputStyle} value={editableConfig.drone_config.whisper_footer} onChange={e => {
-                                const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, whisper_footer: nextValue } }));
-                            }} /></label>
-                            <label>Drone loud header<input style={inputStyle} value={editableConfig.drone_config.loud_header} onChange={e => {
-                                const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, loud_header: nextValue } }));
-                            }} /></label>
-                            <label>Drone loud footer<input style={inputStyle} value={editableConfig.drone_config.loud_footer} onChange={e => {
-                                const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, loud_footer: nextValue } }));
-                            }} /></label>
-                        </div>
-                    </div>
-
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>UWU</h4>
-                        <div style={{ marginTop: "8px" }}>{renderTimeoutControls("uwu_end", "UWU timeout")}</div>
-                    </div>
-
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Censored</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
-                            {renderTimeoutControls("censored_end", "Censored timeout")}
-                            <label>Censored replacement<input style={inputStyle} value={editableConfig.config.censored_replacement} onChange={e => {
-                                const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, config: { ...prev.config, censored_replacement: nextValue } }));
-                            }} /></label>
-                            <label>Censored words (one per line)<textarea style={{ ...inputStyle, minHeight: "90px" }} value={censoredWordsText} onChange={e => setCensoredWordsText(e.currentTarget.value)} /></label>
-                        </div>
-                    </div>
-
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Scope Filter</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
-                            <label>
-                                Filter mode
-                                <select
-                                    style={inputStyle}
-                                    value={editableConfig.filter_mode}
-                                    onChange={e => {
-                                        const nextMode: ScopeFilterMode = e.currentTarget.value === "blacklist" ? "blacklist" : "whitelist";
-                                        setEditableConfig(prev => ({ ...prev, filter_mode: nextMode }));
-                                    }}
-                                >
-                                    <option value="whitelist">Whitelist mode (only listed servers/DMs are transformed)</option>
-                                    <option value="blacklist">Blacklist mode (listed servers/DMs are skipped)</option>
-                                </select>
-                            </label>
-                            <p style={{ margin: 0, color: "#b5bac1" }}>
-                                Use the server or DM right-click menu to add/remove entries from the shared scope list.
-                            </p>
-                            <ul style={{ marginBottom: 0 }}>
-                                {getSharedScopeList(editableConfig).map((item, index) => (
-                                    <li key={`${item.discord_id}-${item.server_name}-${index}`} style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
-                                        <span>{item.server_name || item.discord_id}</span>
-                                        <button
-                                            style={{ ...buttonStyle, background: "#da373c", borderColor: "#da373c" }}
-                                            onClick={() => {
-                                                setEditableConfig(prev => {
-                                                    const nextList = getSharedScopeList(prev).filter((_, itemIndex) => itemIndex !== index);
-                                                    return { ...prev, whitelist: nextList, blacklist: nextList };
-                                                });
-                                            }}
-                                        >
-                                            Remove
-                                        </button>
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                    </div>
-
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Custom Rules</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
-                            <p style={{ margin: 0, color: "#b5bac1" }}>{editableConfig.rules_groups.length} group(s), {editableConfig.rules.length} rule(s)</p>
-                            <button style={buttonStyle} onClick={() => setIsRulesEditorOpen(true)}>Open rules editor popup</button>
-                            <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                                <input
-                                    type="checkbox"
-                                    checked={editableConfig.config.debug}
-                                    onChange={e => {
-                                        const nextValue = e.currentTarget.checked;
-                                        setEditableConfig(prev => ({ ...prev, config: { ...prev.config, debug: nextValue } }));
-                                    }}
-                                />
-                                Debug mode
-                            </label>
-                        </div>
-                    </div>
-
-                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                        <button style={buttonStyle} onClick={() => refresh().then(() => setStatus("Reloaded config")).catch(err => setStatus(String(err)))}>Reload</button>
-                    </div>
-                </>
-            )}
-
-            {(isOwnProfile || canViewRemote) && isRulesEditorOpen && (
-                <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 9999, display: "grid", placeItems: "center", padding: "20px" }}>
-                    <div style={{ width: "min(980px, 95vw)", maxHeight: "90vh", overflow: "auto", ...sectionStyle, background: "#1e1f22", display: "grid", gap: "10px" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
-                            <h4 style={sectionHeaderStyle}>Custom Rules Editor</h4>
-                            <button style={buttonStyle} onClick={() => setIsRulesEditorOpen(false)}>Close</button>
-                        </div>
-
-                        <button style={buttonStyle} onClick={addRuleGroup}>Add rule group</button>
-
-                        {editableConfig.rules_groups.length === 0 && (
-                            <p style={{ margin: 0, color: "#b5bac1" }}>No rule groups yet. Add one to start.</p>
-                        )}
-
-                        {[...editableConfig.rules_groups].sort((a, b) => a.order - b.order).map(group => {
-                            const groupRules = editableConfig.rules
-                                .map((rule, index) => ({ rule, index }))
-                                .filter(item => item.rule.group_id === group.id)
-                                .sort((a, b) => a.rule.order - b.rule.order);
-
-                            return (
-                                <div key={group.id} style={{ border: "1px solid #3f4147", borderRadius: "10px", padding: "10px", display: "grid", gap: "8px" }}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                                        <strong>Group #{group.id}</strong>
-                                        <button style={{ ...buttonStyle, background: "#da373c", borderColor: "#da373c" }} onClick={() => removeRuleGroup(group.id)}>Remove Group</button>
-                                    </div>
-                                    <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                                        <input
-                                            type="checkbox"
-                                            checked={group.enabled}
-                                            onChange={e => {
-                                                const nextEnabled = e.currentTarget.checked;
-                                                updateRuleGroup(group.id, current => ({ ...current, enabled: nextEnabled }));
-                                            }}
-                                        />
-                                        Enabled
-                                    </label>
-                                    <label>Group order<input style={inputStyle} type="number" min={0} value={group.order} onChange={e => {
-                                        const nextValue = parseNumericInput(e.currentTarget.value, group.order, { min: 0 });
-                                        updateRuleGroup(group.id, current => ({ ...current, order: nextValue }));
-                                    }} /></label>
-                                    <div style={{ display: "grid", gap: "8px" }}>
-                                        <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                                            <strong>Group timeout</strong>
-                                            <span style={{ color: "#b5bac1" }}>{formatTimeoutStatus(group.timeout_end, nowMs)}</span>
-                                        </div>
-                                        <input style={inputStyle} value={group.timeout_end} onChange={e => setGroupTimeout(group.id, e.currentTarget.value)} />
-                                        <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
-                                            <input
-                                                style={{ ...inputStyle, width: "110px" }}
-                                                type="number"
-                                                min={1}
-                                                value={groupTimeoutAdjustments[group.id] ?? "1"}
-                                                onChange={e => {
-                                                    const nextAdjustment = e.currentTarget.value;
-                                                    setGroupTimeoutAdjustments(prev => ({ ...prev, [group.id]: nextAdjustment }));
-                                                }}
-                                            />
-                                            <button style={buttonStyle} onClick={() => addGroupTimeoutAmount(group.id, 1)}>Add Seconds</button>
-                                            <button style={buttonStyle} onClick={() => addGroupTimeoutAmount(group.id, 60)}>Add Minutes</button>
-                                            <button style={buttonStyle} onClick={() => addGroupTimeoutAmount(group.id, 3600)}>Add Hours</button>
-                                            <button style={buttonStyle} onClick={() => setGroupPermanentTimeout(group.id)}>Permanent</button>
-                                        </div>
-                                    </div>
-                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                                        <strong>Rules</strong>
-                                        <button style={buttonStyle} onClick={() => addRuleToGroup(group.id)}>Add Rule</button>
-                                    </div>
-                                    {groupRules.length === 0 && (
-                                        <p style={{ margin: 0, color: "#b5bac1" }}>No rules in this group.</p>
-                                    )}
-                                    {groupRules.map(({ rule, index }) => (
-                                        <div key={`${group.id}-${index}`} style={{ border: "1px solid #3f4147", borderRadius: "8px", padding: "8px", display: "grid", gap: "8px" }}>
-                                            <label>Regex rule<input style={inputStyle} value={rule.rule_regex} onChange={e => {
-                                                const nextRegex = e.currentTarget.value;
-                                                updateRuleAtIndex(index, current => ({ ...current, rule_regex: nextRegex }));
-                                            }} /></label>
-                                            <label>Replacement<input style={inputStyle} value={rule.rule_replacement} onChange={e => {
-                                                const nextReplacement = e.currentTarget.value;
-                                                updateRuleAtIndex(index, current => ({ ...current, rule_replacement: nextReplacement }));
-                                            }} /></label>
-                                            <label>Trigger chance ({Math.round(rule.chance_to_apply * 100)}%)<input style={inputStyle} type="range" min={0} max={100} step={1} value={Math.round(rule.chance_to_apply * 100)} onChange={e => {
-                                                const nextValue = parseNumericInput(e.currentTarget.value, 100, { min: 0, max: 100 });
-                                                updateRuleAtIndex(index, current => ({ ...current, chance_to_apply: nextValue / 100 }));
-                                            }} /></label>
-                                            <label>Rule order<input style={inputStyle} type="number" min={0} value={rule.order} onChange={e => {
-                                                const nextValue = parseNumericInput(e.currentTarget.value, rule.order, { min: 0 });
-                                                updateRuleAtIndex(index, current => ({ ...current, order: nextValue }));
-                                            }} /></label>
-                                            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
-                                                <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                                                    <input type="checkbox" checked={rule.enabled} onChange={e => {
-                                                        const nextEnabled = e.currentTarget.checked;
-                                                        updateRuleAtIndex(index, current => ({ ...current, enabled: nextEnabled }));
-                                                    }} />
-                                                    Enabled
-                                                </label>
-                                                <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                                                    <input type="checkbox" checked={rule.regex_normalize} onChange={e => {
-                                                        const nextNormalize = e.currentTarget.checked;
-                                                        updateRuleAtIndex(index, current => ({ ...current, regex_normalize: nextNormalize }));
-                                                    }} />
-                                                    Normalize regex
-                                                </label>
-                                            </div>
-                                            <button style={{ ...buttonStyle, background: "#da373c", borderColor: "#da373c" }} onClick={() => removeRuleAtIndex(index)}>Remove Rule</button>
-                                        </div>
-                                    ))}
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
-            )}
-
-            {isOwnProfile && (
-                <>
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Allowed Editors</h4>
-                        <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
-                            <input
-                                placeholder="Discord ID"
-                                value={newEditorId}
-                                onChange={e => setNewEditorId(e.currentTarget.value)}
-                                style={inputStyle}
-                            />
+                    {!isOwnProfile && !canViewRemote && (
+                        <div style={sectionStyle}>
+                            <p style={{ marginTop: 0 }}>You do not currently have permission to view this profile config.</p>
                             <button
                                 style={buttonStyle}
                                 onClick={async () => {
                                     try {
-                                        await addAllowedEditor(activeUserId, newEditorId);
-                                        setNewEditorId("");
-                                        await refresh();
-                                        setStatus("Added allowed editor");
+                                        await requestRemoteAccess(settings.store.relayUrl, activeUserId, profileUserId);
+                                        setStatus(`Requested config access from ${profileUserId}`);
                                     } catch (err) {
-                                        setStatus(String(err));
+                                        setStatus(formatConfigAccessError(err, profileUserId));
                                     }
                                 }}
                             >
-                                Add
+                                Request Access
                             </button>
                         </div>
-                        <ul style={{ marginBottom: 0 }}>
-                            {allowedEditors.map(editor => (
-                                <li key={editor} style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
-                                    <span>{editor}</span>
-                                    <button
-                                        style={{ ...buttonStyle, background: "#da373c", borderColor: "#da373c" }}
-                                        onClick={async () => {
-                                            try {
-                                                await removeAllowedEditor(activeUserId, editor);
-                                                await refresh();
-                                                setStatus(`Removed ${editor}`);
-                                            } catch (err) {
-                                                setStatus(String(err));
-                                            }
-                                        }}
-                                    >
-                                        Remove
-                                    </button>
-                                </li>
-                            ))}
-                        </ul>
-                    </div>
+                    )}
 
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Pending Requests</h4>
-                        <ul style={{ marginBottom: 0 }}>
-                            {pendingRequests.length === 0 && <li>No pending requests</li>}
-                            {pendingRequests.map(requesterId => (
-                                <li key={requesterId} style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
-                                    <span>{requesterId}</span>
-                                    <div style={{ display: "flex", gap: "8px" }}>
+                    {(isOwnProfile || canViewRemote) && (
+                        <>
+                            {/* Gag Section */}
+                            <div style={sectionStyle}>
+                                {renderHeader("Gag", "gag")}
+                                {openSections.gag && (
+                                    <div style={{ marginTop: "12px" }}>
+                                        {renderTimeoutControls("gag_end", "Gag timeout")}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Pet Section */}
+                            <div style={sectionStyle}>
+                                {renderHeader("Pet", "pet")}
+                                {openSections.pet && (
+                                    <div style={{ display: "grid", gap: "8px", marginTop: "12px" }}>
+                                        {renderTimeoutControls("pet_end", "Pet timeout")}
+                                        <label>
+                                            Pet type
+                                            <select
+                                                style={inputStyle}
+                                                value={petTypeOptions.some(option => option.value === editableConfig.config.pet_type) ? editableConfig.config.pet_type : petTypeOptions[0].value}
+                                                onChange={e => {
+                                                    const nextValue = Number(e.currentTarget.value);
+                                                    setEditableConfig(prev => ({
+                                                        ...prev,
+                                                        config: {
+                                                            ...prev.config,
+                                                            pet_type: nextValue
+                                                        }
+                                                    }));
+                                                }}
+                                            >
+                                                {petTypeOptions.map(option => (
+                                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                                ))}
+                                            </select>
+                                        </label>
+                                        <label>
+                                            Pet amount ({Math.round(editableConfig.config.pet_amount * 100)}%)
+                                            <input
+                                                style={inputStyle}
+                                                type="range"
+                                                min={0}
+                                                max={100}
+                                                step={1}
+                                                value={Math.round(editableConfig.config.pet_amount * 100)}
+                                                onChange={e => {
+                                                    const nextValue = parseNumericInput(e.currentTarget.value, 100, { min: 0, max: 100 });
+                                                    setEditableConfig(prev => ({
+                                                        ...prev,
+                                                        config: {
+                                                            ...prev.config,
+                                                            pet_amount: nextValue / 100
+                                                        }
+                                                    }));
+                                                }}
+                                            />
+                                        </label>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Bimbo Section */}
+                            <div style={sectionStyle}>
+                                {renderHeader("Bimbo", "bimbo")}
+                                {openSections.bimbo && (
+                                    <div style={{ display: "grid", gap: "8px", marginTop: "12px" }}>
+                                        {renderTimeoutControls("bimbo_end", "Bimbo timeout")}
+                                        <label>
+                                            Bimbo word length
+                                            <input
+                                                style={inputStyle}
+                                                type="number"
+                                                min={1}
+                                                value={editableConfig.config.bimbo_word_length}
+                                                onChange={e => {
+                                                    const nextValue = e.currentTarget.value;
+                                                    setEditableConfig(prev => ({
+                                                        ...prev,
+                                                        config: {
+                                                            ...prev.config,
+                                                            bimbo_word_length: parseNumericInput(nextValue, prev.config.bimbo_word_length, { min: 1 })
+                                                        }
+                                                    }));
+                                                }}
+                                            />
+                                        </label>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Horny Section */}
+                            <div style={sectionStyle}>
+                                {renderHeader("Horny", "horny")}
+                                {openSections.horny && (
+                                    <div style={{ marginTop: "12px" }}>
+                                        {renderTimeoutControls("horny_end", "Horny timeout")}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Drone Section */}
+                            <div style={sectionStyle}>
+                                {renderHeader("Drone", "drone")}
+                                {openSections.drone && (
+                                    <div style={{ display: "grid", gap: "8px", marginTop: "12px" }}>
+                                        {renderTimeoutControls("drone_end", "Drone timeout")}
+                                        <label>Drone term<input style={inputStyle} value={editableConfig.drone_config.drone_term} onChange={e => {
+                                            const nextValue = e.currentTarget.value;
+                                            setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, drone_term: nextValue } }));
+                                        }} /></label>
+                                        <label>Drone speech header<input style={inputStyle} value={editableConfig.drone_config.speech_header} onChange={e => {
+                                            const nextValue = e.currentTarget.value;
+                                            setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, speech_header: nextValue } }));
+                                        }} /></label>
+                                        <label>Drone speech footer<input style={inputStyle} value={editableConfig.drone_config.speech_footer} onChange={e => {
+                                            const nextValue = e.currentTarget.value;
+                                            setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, speech_footer: nextValue } }));
+                                        }} /></label>
+                                        <label>Drone action header<input style={inputStyle} value={editableConfig.drone_config.action_header} onChange={e => {
+                                            const nextValue = e.currentTarget.value;
+                                            setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, action_header: nextValue } }));
+                                        }} /></label>
+                                        <label>Drone action footer<input style={inputStyle} value={editableConfig.drone_config.action_footer} onChange={e => {
+                                            const nextValue = e.currentTarget.value;
+                                            setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, action_footer: nextValue } }));
+                                        }} /></label>
+                                        <label>Drone whisper header<input style={inputStyle} value={editableConfig.drone_config.whisper_header} onChange={e => {
+                                            const nextValue = e.currentTarget.value;
+                                            setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, whisper_header: nextValue } }));
+                                        }} /></label>
+                                        <label>Drone whisper footer<input style={inputStyle} value={editableConfig.drone_config.whisper_footer} onChange={e => {
+                                            const nextValue = e.currentTarget.value;
+                                            setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, whisper_footer: nextValue } }));
+                                        }} /></label>
+                                        <label>Drone loud header<input style={inputStyle} value={editableConfig.drone_config.loud_header} onChange={e => {
+                                            const nextValue = e.currentTarget.value;
+                                            setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, loud_header: nextValue } }));
+                                        }} /></label>
+                                        <label>Drone loud footer<input style={inputStyle} value={editableConfig.drone_config.loud_footer} onChange={e => {
+                                            const nextValue = e.currentTarget.value;
+                                            setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, loud_footer: nextValue } }));
+                                        }} /></label>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* UWU Section */}
+                            <div style={sectionStyle}>
+                                {renderHeader("UWU", "uwu")}
+                                {openSections.uwu && (
+                                    <div style={{ marginTop: "12px" }}>
+                                        {renderTimeoutControls("uwu_end", "UWU timeout")}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Censored Section */}
+                            <div style={sectionStyle}>
+                                {renderHeader("Censored", "censored")}
+                                {openSections.censored && (
+                                    <div style={{ display: "grid", gap: "8px", marginTop: "12px" }}>
+                                        {renderTimeoutControls("censored_end", "Censored timeout")}
+                                        <label>Censored replacement<input style={inputStyle} value={editableConfig.config.censored_replacement} onChange={e => {
+                                            const nextValue = e.currentTarget.value;
+                                            setEditableConfig(prev => ({
+                                                ...prev,
+                                                config: {
+                                                    ...prev.config,
+                                                    censored_replacement: nextValue
+                                                }
+                                            }));
+                                        }} /></label>
+                                        <label>
+                                            Censored words (one per line)
+                                            <textarea
+                                                style={{ ...inputStyle, minHeight: "100px", resize: "vertical" }}
+                                                value={censoredWordsText}
+                                                onChange={e => setCensoredWordsText(e.currentTarget.value)}
+                                            />
+                                        </label>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Scope Section */}
+                            <div style={sectionStyle}>
+                                {renderHeader("Scope", "scope")}
+                                {openSections.scope && (
+                                    <div style={{ display: "grid", gap: "8px", marginTop: "12px" }}>
+                                        <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={editableConfig.config.intercept_guilds}
+                                                onChange={e => {
+                                                    const checked = e.currentTarget.checked;
+                                                    setEditableConfig(prev => ({
+                                                        ...prev,
+                                                        config: { ...prev.config, intercept_guilds: checked }
+                                                    }));
+                                                }}
+                                            />
+                                            Intercept Guild Channels
+                                        </label>
+                                        <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={editableConfig.config.intercept_dms}
+                                                onChange={e => {
+                                                    const checked = e.currentTarget.checked;
+                                                    setEditableConfig(prev => ({
+                                                        ...prev,
+                                                        config: { ...prev.config, intercept_dms: checked }
+                                                    }));
+                                                }}
+                                            />
+                                            Intercept Direct Messages
+                                        </label>
+                                        <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={editableConfig.config.intercept_group_dms}
+                                                onChange={e => {
+                                                    const checked = e.currentTarget.checked;
+                                                    setEditableConfig(prev => ({
+                                                        ...prev,
+                                                        config: { ...prev.config, intercept_group_dms: checked }
+                                                    }));
+                                                }}
+                                            />
+                                            Intercept Group DMs
+                                        </label>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Rules Section */}
+                            <div style={sectionStyle}>
+                                {renderHeader("Rules", "rules")}
+                                {openSections.rules && (
+                                    <div style={{ display: "grid", gap: "12px", marginTop: "12px" }}>
                                         <button
                                             style={buttonStyle}
-                                            onClick={async () => {
-                                                try {
-                                                    await approveAccessRequest(settings.store.relayUrl, activeUserId, requesterId);
-                                                    await refresh();
-                                                    setStatus(`Approved ${requesterId}`);
-                                                } catch (err) {
-                                                    setStatus(String(err));
-                                                }
-                                            }}
+                                            onClick={() => setIsRulesEditorOpen(prev => !prev)}
                                         >
-                                            Approve
+                                            {isRulesEditorOpen ? "Hide Rules Editor" : "Show Rules Editor"}
                                         </button>
-                                        <button
-                                            style={{ ...buttonStyle, background: "#da373c", borderColor: "#da373c" }}
-                                            onClick={async () => {
-                                                try {
-                                                    await denyAccessRequest(settings.store.relayUrl, activeUserId, requesterId);
-                                                    await refresh();
-                                                    setStatus(`Denied ${requesterId}`);
-                                                } catch (err) {
-                                                    setStatus(String(err));
-                                                }
-                                            }}
-                                        >
-                                            Deny
-                                        </button>
+
+                                        {isRulesEditorOpen && (
+                                            <div style={{ display: "grid", gap: "12px" }}>
+                                                <button style={buttonStyle} onClick={addRuleGroup}>
+                                                    Add Rule Group
+                                                </button>
+
+                                                {editableConfig.rules_groups.map(group => (
+                                                    <div
+                                                        key={group.id}
+                                                        style={{
+                                                            background: "#1e1f22",
+                                                            border: "1px solid #3f4147",
+                                                            borderRadius: "8px",
+                                                            padding: "12px",
+                                                            display: "grid",
+                                                            gap: "8px"
+                                                        }}
+                                                    >
+                                                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                                            <strong>Group #{group.id}</strong>
+                                                            <button
+                                                                style={{ ...buttonStyle, background: "#da373c", borderColor: "#da373c" }}
+                                                                onClick={() => removeRuleGroup(group.id)}
+                                                            >
+                                                                Remove Group
+                                                            </button>
+                                                        </div>
+
+                                                        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                                                            <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={group.enabled}
+                                                                    onChange={e => {
+                                                                        const checked = e.currentTarget.checked;
+                                                                        updateRuleGroup(group.id, g => ({ ...g, enabled: checked }));
+                                                                    }}
+                                                                />
+                                                                Enabled
+                                                            </label>
+                                                        </div>
+
+                                                        <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                                                            <span style={{ fontSize: "14px", color: "#b5bac1" }}>
+                                                                Timeout: {formatTimeoutStatus(group.timeout_end, nowMs)}
+                                                            </span>
+                                                            <input
+                                                                style={{ ...inputStyle, width: "80px" }}
+                                                                type="number"
+                                                                min={1}
+                                                                value={groupTimeoutAdjustments[group.id] ?? "1"}
+                                                                onChange={e => {
+                                                                    const val = e.currentTarget.value;
+                                                                    setGroupTimeoutAdjustments(prev => ({ ...prev, [group.id]: val }));
+                                                                }}
+                                                            />
+                                                            <button style={buttonStyle} onClick={() => addGroupTimeoutAmount(group.id, 1)}>+1s</button>
+                                                            <button style={buttonStyle} onClick={() => addGroupTimeoutAmount(group.id, 60)}>+1m</button>
+                                                            <button style={buttonStyle} onClick={() => addGroupTimeoutAmount(group.id, 3600)}>+1h</button>
+                                                            <button style={buttonStyle} onClick={() => setGroupPermanentTimeout(group.id)}>Permanent</button>
+                                                            <button style={buttonStyle} onClick={() => setGroupTimeout(group.id, epoch)}>Off</button>
+                                                        </div>
+
+                                                        {/* Rules within this Group */}
+                                                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
+                                                            <div style={{ fontWeight: 600, fontSize: "14px" }}>Group Rules</div>
+                                                            {editableConfig.rules
+                                                                .map((rule, index) => ({ rule, index }))
+                                                                .filter(({ rule }) => rule.group_id === group.id)
+                                                                .map(({ rule, index }) => (
+                                                                    <div
+                                                                        key={index}
+                                                                        style={{
+                                                                            background: "#2b2d31",
+                                                                            border: "1px solid #3f4147",
+                                                                            borderRadius: "6px",
+                                                                            padding: "8px",
+                                                                            display: "grid",
+                                                                            gap: "6px"
+                                                                        }}
+                                                                    >
+                                                                        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                                                                            <input
+                                                                                style={inputStyle}
+                                                                                placeholder="Regex pattern"
+                                                                                value={rule.rule_regex}
+                                                                                onChange={e => {
+                                                                                    const val = e.currentTarget.value;
+                                                                                    updateRuleAtIndex(index, r => ({ ...r, rule_regex: val }));
+                                                                                }}
+                                                                            />
+                                                                            <input
+                                                                                style={inputStyle}
+                                                                                placeholder="Replacement"
+                                                                                value={rule.rule_replacement}
+                                                                                onChange={e => {
+                                                                                    const val = e.currentTarget.value;
+                                                                                    updateRuleAtIndex(index, r => ({ ...r, rule_replacement: val }));
+                                                                                }}
+                                                                            />
+                                                                        </div>
+
+                                                                        <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap", fontSize: "14px" }}>
+                                                                            <label style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                                                                                <input
+                                                                                    type="checkbox"
+                                                                                    checked={rule.enabled}
+                                                                                    onChange={e => {
+                                                                                        const checked = e.currentTarget.checked;
+                                                                                        updateRuleAtIndex(index, r => ({ ...r, enabled: checked }));
+                                                                                    }}
+                                                                                />
+                                                                                Enabled
+                                                                            </label>
+                                                                            <label style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                                                                                <input
+                                                                                    type="checkbox"
+                                                                                    checked={rule.regex_normalize}
+                                                                                    onChange={e => {
+                                                                                        const checked = e.currentTarget.checked;
+                                                                                        updateRuleAtIndex(index, r => ({ ...r, regex_normalize: checked }));
+                                                                                    }}
+                                                                                />
+                                                                                Normalize
+                                                                            </label>
+                                                                            <label style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                                                                                Chance:
+                                                                                <input
+                                                                                    style={{ ...inputStyle, width: "60px", padding: "4px" }}
+                                                                                    type="number"
+                                                                                    min={0}
+                                                                                    max={1}
+                                                                                    step={0.1}
+                                                                                    value={rule.chance_to_apply}
+                                                                                    onChange={e => {
+                                                                                        const val = parseNumericInput(e.currentTarget.value, rule.chance_to_apply, { min: 0, max: 1 });
+                                                                                        updateRuleAtIndex(index, r => ({ ...r, chance_to_apply: val }));
+                                                                                    }}
+                                                                                />
+                                                                            </label>
+                                                                            <button
+                                                                                style={{ ...buttonStyle, background: "#da373c", borderColor: "#da373c", padding: "4px 8px", marginLeft: "auto" }}
+                                                                                onClick={() => removeRuleAtIndex(index)}
+                                                                            >
+                                                                                Delete Rule
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                ))}
+
+                                                            <button
+                                                                style={{ ...buttonStyle, background: "#4e5058", borderColor: "#4e5058", marginTop: "4px" }}
+                                                                onClick={() => addRuleToGroup(group.id)}
+                                                            >
+                                                                + Add Rule
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
                                     </div>
-                                </li>
-                            ))}
-                        </ul>
-                    </div>
+                                )}
+                            </div>
+
+                            {/* Editors Section (Own Profile Only) */}
+                            {isOwnProfile && (
+                                <div style={sectionStyle}>
+                                    {renderHeader("Allowed Editors", "editors")}
+                                    {openSections.editors && (
+                                        <div style={{ display: "grid", gap: "12px", marginTop: "12px" }}>
+                                            <div style={{ display: "flex", gap: "8px" }}>
+                                                <input
+                                                    style={inputStyle}
+                                                    placeholder="User ID"
+                                                    value={newEditorId}
+                                                    onChange={e => setNewEditorId(e.currentTarget.value)}
+                                                />
+                                                <button
+                                                    style={buttonStyle}
+                                                    onClick={async () => {
+                                                        if (!newEditorId.trim()) return;
+                                                        try {
+                                                            await addAllowedEditor(activeUserId, newEditorId.trim());
+                                                            setAllowedEditors(prev => [...prev, newEditorId.trim()].sort());
+                                                            setNewEditorId("");
+                                                            setStatus(`Added editor ${newEditorId.trim()}`);
+                                                        } catch (err) {
+                                                            setStatus(`Failed to add editor: ${String(err)}`);
+                                                        }
+                                                    }}
+                                                >
+                                                    Add
+                                                </button>
+                                            </div>
+
+                                            {allowedEditors.length > 0 && (
+                                                <div style={{ display: "grid", gap: "4px" }}>
+                                                    <div style={{ fontWeight: 600, fontSize: "14px" }}>Current Editors:</div>
+                                                    {allowedEditors.map(editorId => (
+                                                        <div key={editorId} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#1e1f22", padding: "6px 12px", borderRadius: "6px" }}>
+                                                            <span>{editorId}</span>
+                                                            <button
+                                                                style={{ ...buttonStyle, background: "#da373c", borderColor: "#da373c", padding: "4px 8px" }}
+                                                                onClick={async () => {
+                                                                    try {
+                                                                        await removeAllowedEditor(activeUserId, editorId);
+                                                                        setAllowedEditors(prev => prev.filter(id => id !== editorId));
+                                                                        setStatus(`Removed editor ${editorId}`);
+                                                                    } catch (err) {
+                                                                        setStatus(`Failed to remove editor: ${String(err)}`);
+                                                                    }
+                                                                }}
+                                                            >
+                                                                Remove
+                                                            </button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            {pendingRequests.length > 0 && (
+                                                <div style={{ display: "grid", gap: "4px", marginTop: "8px" }}>
+                                                    <div style={{ fontWeight: 600, fontSize: "14px", color: "#f0b232" }}>Pending Access Requests:</div>
+                                                    {pendingRequests.map(requesterId => (
+                                                        <div key={requesterId} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#1e1f22", padding: "6px 12px", borderRadius: "6px" }}>
+                                                            <span>{requesterId}</span>
+                                                            <button
+                                                                style={{ ...buttonStyle, padding: "4px 8px" }}
+                                                                onClick={async () => {
+                                                                    try {
+                                                                        await addAllowedEditor(activeUserId, requesterId);
+                                                                        setAllowedEditors(prev => [...prev, requesterId].sort());
+                                                                        setPendingRequests(prev => prev.filter(id => id !== requesterId));
+                                                                        setStatus(`Approved access for ${requesterId}`);
+                                                                    } catch (err) {
+                                                                        setStatus(`Failed to approve request: ${String(err)}`);
+                                                                    }
+                                                                }}
+                                                            >
+                                                                Approve
+                                                            </button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </>
+                    )}
                 </>
             )}
-
-            <p style={{ margin: 0, color: "#b5bac1" }}>{status}</p>
         </div>
     );
 }
