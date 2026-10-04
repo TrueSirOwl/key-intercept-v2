@@ -2465,6 +2465,7 @@ const settings = definePluginSettings({
 
 const plugin = definePlugin({
     name: "key-intercept",
+    required: true,
     description: "Original key-intercept behavior with self-hosted loopback/relay config",
     authors: [{ name: "Tom", id: 277137325342064640n }],
     settings,
