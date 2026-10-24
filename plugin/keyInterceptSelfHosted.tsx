@@ -1815,7 +1815,7 @@ function ConfigPanel(props: any) {
                 ...prev,
                 rules_groups: [
                     ...prev.rules_groups,
-                    { id: nextGroupId, timeout_end: farFuture, enabled: true, order: nextOrder }
+                    { id: nextGroupId, name: `Group ${nextGroupId}`, timeout_end: farFuture, enabled: true, order: nextOrder }
                 ]
             };
         });
