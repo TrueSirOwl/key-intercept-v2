@@ -26,8 +26,7 @@ struct Args {
     #[arg(long)]
     relay_server_url: Option<String>,
 
-    #[arg(long)]
-    #[arg(long, default_value = "Key-Intercept")]
+    #[arg(long, default_value = "TrueSirOwl")]
     repo_owner: String,
 
     #[arg(long, default_value = "key-intercept-v2")]
@@ -53,7 +52,7 @@ struct Args {
 
     #[arg(
         long,
-        default_value = "https://key-intercept.github.io/key-intercept-v2/"
+        default_value = "https://truesirowl.github.io/key-intercept-v2/"
     )]
     kettu_plugin_source_url: String,
 }
