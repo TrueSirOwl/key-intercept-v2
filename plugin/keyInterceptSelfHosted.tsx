@@ -1711,6 +1711,15 @@ function ConfigPanel(props: any) {
     const lastSavedSnapshotRef = React.useRef("");
     const saveQueueRef = React.useRef(Promise.resolve());
     const refreshInFlightRef = React.useRef(false);
+    // Snapshot of what the editor currently shows. Async loads/saves compare against it so a
+    // result that lands after the user kept typing doesn't overwrite the newer edits.
+    const editorSnapshot = JSON.stringify(mergeLocalConfig({
+        ...editableConfig,
+        pet_words: getPetWordsForType(editableConfig.config.pet_type, editableConfig.pet_words),
+        censored_words: fromLines(censoredWordsText)
+    }));
+    const editorSnapshotRef = React.useRef(editorSnapshot);
+    editorSnapshotRef.current = editorSnapshot;
     const remoteSourceRef = React.useRef<"auto" | "pc" | "mobile">("mobile");
     const stopKeyPropagation = React.useCallback((event: React.KeyboardEvent) => {
         event.stopPropagation();
@@ -1753,6 +1762,8 @@ function ConfigPanel(props: any) {
     const refresh = React.useCallback(async () => {
         if (refreshInFlightRef.current) return;
         refreshInFlightRef.current = true;
+        const snapshotAtStart = editorSnapshotRef.current;
+        const editedSinceStart = () => editorSnapshotRef.current !== snapshotAtStart;
         console.info(`${LOG_PREFIX} refresh:start`, { activeUserId, profileUserId, isOwnProfile });
         try {
             const identityError = getIdentityValidationError(activeUserId, profileUserId, isOwnProfile);
@@ -1771,7 +1782,7 @@ function ConfigPanel(props: any) {
                     getAllowedEditors(activeUserId),
                     getAccessRequests(settings.store.relayUrl, activeUserId).catch(() => ({ requests: [] }))
                 ]);
-                updateFromConfig(config);
+                if (!editedSinceStart()) updateFromConfig(config);
                 setAllowedEditors(editors.allowed_editors.sort());
                 setPendingRequests(requests.requests.sort());
                 setCanViewRemote(true);
@@ -1794,7 +1805,7 @@ function ConfigPanel(props: any) {
                 remote = await readRemoteConfig(settings.store.relayUrl, activeUserId, profileUserId, "auto");
                 remoteSourceRef.current = "auto";
             }
-            updateFromConfig(remote);
+            if (!editedSinceStart()) updateFromConfig(remote);
             setCanViewRemote(true);
             console.info(`${LOG_PREFIX} refresh:success`, {
                 activeUserId,
@@ -2000,7 +2011,9 @@ function ConfigPanel(props: any) {
         });
         if (isOwnProfile) {
             appliedConfig = await saveLocalConfig(activeUserId, mergedConfig);
-            updateFromConfig(appliedConfig);
+            // If the editor moved on while this save was queued or running, newer saves follow;
+            // applying this result would revert those edits.
+            if (editorSnapshotRef.current === JSON.stringify(mergedConfig)) updateFromConfig(appliedConfig);
             if (!options?.quiet) setStatus("Auto-saved local config");
         } else {
             await pushRemoteConfig(
