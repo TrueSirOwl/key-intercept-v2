@@ -2309,7 +2309,7 @@ function ConfigPanel(props: any) {
             )}
 
             {((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && isRulesEditorOpen && (
-                ReactDOM.createPortal(<div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 9999, display: "grid", placeItems: "center", padding: "20px" }}>
+                ReactDOM.createPortal(<div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", color: "#f2f3f5", zIndex: 9999, display: "grid", placeItems: "center", padding: "20px" }}>
                     <div style={{ width: "min(980px, 95vw)", maxHeight: "90vh", overflow: "auto", ...sectionStyle, background: "#1e1f22", display: "grid", gap: "10px" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
                             <h4 style={sectionHeaderStyle}>Custom Rules Editor</h4>
