@@ -177,6 +177,14 @@ function formatCountdown(msRemaining) {
     return parts.join(" ");
 }
 
+// Adds time to a timeout. A running timeout is extended; an expired, invalid or permanent one
+// starts from now (extending "permanent" would only push year 9999 further out).
+function extendTimeout(endIso, nowMs, seconds) {
+    const endMs = Date.parse(endIso);
+    const isRunning = Number.isFinite(endMs) && endMs > nowMs && endMs < permanentTimestamp - 1000;
+    return new Date((isRunning ? endMs : nowMs) + seconds * 1000).toISOString();
+}
+
 function formatTimeoutStatus(endIso, nowMs) {
     const endMs = Date.parse(endIso);
     if (!Number.isFinite(endMs)) return "Invalid timestamp";
@@ -2277,9 +2285,7 @@ function ConfigPanel(props) {
             setStatus(`Enter a positive number for ${field}`);
             return;
         }
-        const currentEndMs = Date.parse(editableConfig.config[field]);
-        const baseline = Number.isFinite(currentEndMs) && currentEndMs > nowMs ? currentEndMs : nowMs;
-        const nextIso = new Date(baseline + amount * multiplierSeconds * 1000).toISOString();
+        const nextIso = extendTimeout(editableConfig.config[field], nowMs, amount * multiplierSeconds);
         setTimeoutValue(field, nextIso);
         setStatus(`${field}: ${formatTimeoutStatus(nextIso, nowMs)}`);
     }, [editableConfig.config, nowMs, setTimeoutValue, timeoutAdjustments]);
@@ -2313,12 +2319,7 @@ function ConfigPanel(props) {
             ...prev,
             rules_groups: prev.rules_groups.map(group => {
                 if (group.id !== groupId) return group;
-                const currentEndMs = Date.parse(group.timeout_end);
-                const baseline = Number.isFinite(currentEndMs) && currentEndMs > nowMs ? currentEndMs : nowMs;
-                return {
-                    ...group,
-                    timeout_end: new Date(baseline + amount * multiplierSeconds * 1000).toISOString()
-                };
+                return { ...group, timeout_end: extendTimeout(group.timeout_end, nowMs, amount * multiplierSeconds) };
             })
         }));
     }, [groupTimeoutAdjustments, nowMs]);
