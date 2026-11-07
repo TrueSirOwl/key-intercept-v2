@@ -2,7 +2,7 @@ import { definePluginSettings } from "@api/Settings";
 import { findGroupChildrenByChildId } from "@api/ContextMenu";
 import definePlugin, { OptionType } from "@utils/types";
 import { findByPropsLazy } from "@webpack";
-import { Menu, React, UserStore } from "@webpack/common";
+import { Menu, React, ReactDOM, UserStore } from "@webpack/common";
 
 const LOOPBACK = "http://127.0.0.1:35491";
 const DISCORD_SECURE_ORIGINS = new Set(["https://discord.com", "https://ptb.discord.com", "https://canary.discord.com"]);
@@ -2261,7 +2261,7 @@ function ConfigPanel(props: any) {
             )}
 
             {((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && isRulesEditorOpen && (
-                <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 9999, display: "grid", placeItems: "center", padding: "20px" }}>
+                ReactDOM.createPortal(<div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 9999, display: "grid", placeItems: "center", padding: "20px" }}>
                     <div style={{ width: "min(980px, 95vw)", maxHeight: "90vh", overflow: "auto", ...sectionStyle, background: "#1e1f22", display: "grid", gap: "10px" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
                             <h4 style={sectionHeaderStyle}>Custom Rules Editor</h4>
@@ -2383,7 +2383,7 @@ function ConfigPanel(props: any) {
                             );
                         })}
                     </div>
-                </div>
+                </div>, document.body)
             )}
 
             {isOwnProfile && (
