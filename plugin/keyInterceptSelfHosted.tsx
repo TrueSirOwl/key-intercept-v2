@@ -8,7 +8,8 @@ const LOOPBACK = "http://127.0.0.1:35491";
 const DISCORD_SECURE_ORIGINS = new Set(["https://discord.com", "https://ptb.discord.com", "https://canary.discord.com"]);
 const LOG_PREFIX = "[key-intercept]";
 const MOBILE_STATE_KEY = "key-intercept/mobile-loopback-state/v1";
-const PANEL_COLLAPSED_KEY = "key-intercept/panel-collapsed";
+const PANEL_COLLAPSED_KEY = "panel";
+const SECTION_COLLAPSED_KEY_PREFIX = "section/";
 const DEVELOPER_MODE_ENABLED = (() => {
     const values: unknown[] = [];
     try {
@@ -1631,6 +1632,58 @@ function buildScopeTargetFromContext(props: any): ScopeTarget | null {
     return selectedTarget;
 }
 
+const sectionStyle: React.CSSProperties = {
+    background: "#2b2d31",
+    border: "1px solid #3f4147",
+    borderRadius: "8px",
+    padding: "8px 10px"
+};
+const sectionHeaderStyle: React.CSSProperties = {
+    margin: 0,
+    fontSize: "14px"
+};
+// A stylesheet (not inline styles) so the toggle can keep a :focus-visible ring.
+const COLLAPSE_TOGGLE_CLASS = "key-intercept-collapse-toggle";
+const COLLAPSE_TOGGLE_CSS = `
+.${COLLAPSE_TOGGLE_CLASS} { all: unset; cursor: pointer; display: flex; justify-content: space-between; align-items: center; width: 100%; box-sizing: border-box; border-radius: 4px; }
+.${COLLAPSE_TOGGLE_CLASS}:focus-visible { outline: 2px solid #5865f2; outline-offset: 2px; }
+`;
+
+// Open/closed state lives in a hidden plugin setting so it survives panel remounts
+// and restarts (Discord desktop has no localStorage).
+function usePersistedCollapsed(key: string) {
+    const [collapsed, setCollapsed] = React.useState(() => settings.store.collapsedSections?.[key] ?? false);
+    const toggle = React.useCallback(() => setCollapsed(prev => {
+        const next = !prev;
+        settings.store.collapsedSections = { ...settings.store.collapsedSections, [key]: next };
+        return next;
+    }), [key]);
+    return [collapsed, toggle] as const;
+}
+
+function CollapseToggle({ collapsed, onToggle, children }: { collapsed: boolean; onToggle: () => void; children: React.ReactNode; }) {
+    return (
+        <button type="button" aria-expanded={!collapsed} onClick={onToggle} className={COLLAPSE_TOGGLE_CLASS}>
+            {children}
+            <span style={{ fontSize: "10px", color: "#b5bac1", transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s ease" }}>
+                ▼
+            </span>
+        </button>
+    );
+}
+
+function CollapsibleSection({ id, title, children }: { id: string; title: string; children: React.ReactNode; }) {
+    const [collapsed, toggleCollapsed] = usePersistedCollapsed(`${SECTION_COLLAPSED_KEY_PREFIX}${id}`);
+    return (
+        <div style={sectionStyle}>
+            <CollapseToggle collapsed={collapsed} onToggle={toggleCollapsed}>
+                <span style={{ ...sectionHeaderStyle, fontWeight: 600 }}>{title}</span>
+            </CollapseToggle>
+            {!collapsed && children}
+        </div>
+    );
+}
+
 function ConfigPanel(props: any) {
     const activeUserId = resolveSessionUserId(props);
     const profileUserId = getProfileUserId(props) ?? activeUserId;
@@ -1653,20 +1706,7 @@ function ConfigPanel(props: any) {
     const [isRulesEditorOpen, setIsRulesEditorOpen] = React.useState(false);
     const [nowMs, setNowMs] = React.useState(() => Date.now());
     const [canViewRemote, setCanViewRemote] = React.useState(isOwnProfile);
-    const [isPanelCollapsed, setIsPanelCollapsed] = React.useState(() => {
-        try {
-            return getStorageBackend()?.getItem(PANEL_COLLAPSED_KEY) === "true";
-        } catch {
-            return false;
-        }
-    });
-    React.useEffect(() => {
-        try {
-            getStorageBackend()?.setItem(PANEL_COLLAPSED_KEY, String(isPanelCollapsed));
-        } catch {
-            // ignore: collapse state is a convenience only
-        }
-    }, [isPanelCollapsed]);
+    const [isPanelCollapsed, togglePanelCollapsed] = usePersistedCollapsed(PANEL_COLLAPSED_KEY);
     const skipAutosaveRef = React.useRef(true);
     const lastSavedSnapshotRef = React.useRef("");
     const saveQueueRef = React.useRef(Promise.resolve());
@@ -1681,31 +1721,22 @@ function ConfigPanel(props: any) {
 
     const blocked_by_dom = editableConfig.config.blocked_by_dom;
 
-    const sectionStyle: React.CSSProperties = {
-        background: "#2b2d31",
-        border: "1px solid #3f4147",
-        borderRadius: "12px",
-        padding: "12px"
-    };
     const inputStyle: React.CSSProperties = {
         width: "100%",
-        borderRadius: "8px",
+        boxSizing: "border-box",
+        borderRadius: "6px",
         border: "1px solid #3f4147",
         background: "#1e1f22",
         color: "#f2f3f5",
-        padding: "8px"
+        padding: "5px 8px"
     };
     const buttonStyle: React.CSSProperties = {
-        borderRadius: "8px",
+        borderRadius: "6px",
         border: "1px solid #5865f2",
         background: "#5865f2",
         color: "white",
-        padding: "8px 12px",
+        padding: "5px 10px",
         cursor: "pointer"
-    };
-    const sectionHeaderStyle: React.CSSProperties = {
-        margin: 0,
-        fontSize: "16px"
     };
 
     const updateFromConfig = React.useCallback((config: LocalConfig) => {
@@ -2020,12 +2051,12 @@ function ConfigPanel(props: any) {
     }, [canViewRemote, censoredWordsText, editableConfig, isOwnProfile, saveConfig]);
 
     const renderTimeoutControls = (field: ModeTimeoutFieldKey, label: string) => (
-        <div style={{ display: "grid", gap: "8px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+        <div style={{ display: "grid", gap: "6px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "6px", flexWrap: "wrap" }}>
                 <strong>{label}</strong>
                 <span style={{ color: "#b5bac1" }}>{formatTimeoutStatus(editableConfig.config[field], nowMs)}</span>
             </div>
-            <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
                 <input
                     style={{ ...inputStyle, width: "110px" }}
                     type="number"
@@ -2050,61 +2081,61 @@ function ConfigPanel(props: any) {
 
     return (
         <div
-            style={{ width: "100%", maxWidth: "760px", margin: "0 auto", color: "#f2f3f5", background: "#313338", border: "1px solid #3f4147", borderRadius: "16px", padding: "16px", display: "grid", gap: "12px" }}
+            style={{ width: "100%", maxWidth: "760px", margin: "0 auto", color: "#f2f3f5", background: "#313338", border: "1px solid #3f4147", borderRadius: isPanelCollapsed ? "8px" : "12px", padding: isPanelCollapsed ? "4px 10px" : "10px", boxSizing: "border-box", display: "grid", gap: "6px" }}
             onKeyDown={stopKeyPropagation}
             onKeyUp={stopKeyPropagation}
             onMouseDown={stopMousePropagation}
             onClick={stopMousePropagation}
         >
-            <div style={{ ...sectionStyle, background: "#2b2d31" }}>
-                <button
-                    type="button"
-                    aria-expanded={!isPanelCollapsed}
-                    onClick={() => setIsPanelCollapsed(prev => !prev)}
-                    style={{ all: "unset", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}
-                >
-                    <h3 style={{ margin: 0 }}>key-intercept control center</h3>
-                    <span style={{ fontSize: "12px", color: "#b5bac1", transform: isPanelCollapsed ? "rotate(0deg)" : "rotate(180deg)", transition: "transform 0.2s ease" }}>
-                        ▼
-                    </span>
-                </button>
-                <p style={{ margin: "6px 0 0 0", color: "#b5bac1" }}>
+            <style>{COLLAPSE_TOGGLE_CSS}</style>
+            <CollapseToggle collapsed={isPanelCollapsed} onToggle={togglePanelCollapsed}>
+                <span style={{ fontSize: "14px", fontWeight: 600 }}>key intercept</span>
+            </CollapseToggle>
+
+            {!isPanelCollapsed && (
+            <>
+            <div style={sectionStyle}>
+                <h3 style={{ margin: 0, fontSize: "16px" }}>Control Center</h3>
+                <p style={{ margin: "4px 0 0 0", color: "#b5bac1" }}>
                     {!isOwnProfile ?`Viewing profile ${profileUserId}`:
                     blocked_by_dom ? "Your profile configuration is locked" : "Your profile configuration" }
                 </p>
-                    {!isOwnProfile && canViewRemote && (
-                        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "16px", flexWrap: "wrap" }}>
-                            <button
-                                style={{
-                                    ...buttonStyle,
-                                    background: "#5865f2",
-                                    borderColor: "#5865f2"
-                                }}
-                                onClick={() => {
-                                    setEditableConfig(prev => ({
-                                        ...prev,
-                                        config: {
-                                            ...prev.config,
-                                            blocked_by_dom: !prev.config.blocked_by_dom
-                                        }
-                                    }));
-                                }}
-                            >
-                                Toggle Sub Control
-                            </button>
-                            <span
-                                style={{
-                                    color: editableConfig.config.blocked_by_dom ? "#da373c" : "#3ba55d",
-                                    fontWeight: 600
-                                }}
-                            >
-                                {editableConfig.config.blocked_by_dom ? "Sub Control Blocked" : "Sub Control Allowed"}
-                            </span>
-                        </div>
-                    )}
             </div>
 
-            {!isPanelCollapsed && !isOwnProfile && !canViewRemote && (
+            {!isOwnProfile && canViewRemote && (
+                <CollapsibleSection id="sub-control" title="Sub Control">
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "6px", flexWrap: "wrap" }}>
+                        <button
+                            style={{
+                                ...buttonStyle,
+                                background: "#5865f2",
+                                borderColor: "#5865f2"
+                            }}
+                            onClick={() => {
+                                setEditableConfig(prev => ({
+                                    ...prev,
+                                    config: {
+                                        ...prev.config,
+                                        blocked_by_dom: !prev.config.blocked_by_dom
+                                    }
+                                }));
+                            }}
+                        >
+                            Toggle Sub Control
+                        </button>
+                        <span
+                            style={{
+                                color: editableConfig.config.blocked_by_dom ? "#da373c" : "#3ba55d",
+                                fontWeight: 600
+                            }}
+                        >
+                            {editableConfig.config.blocked_by_dom ? "Sub Control Blocked" : "Sub Control Allowed"}
+                        </span>
+                    </div>
+                </CollapsibleSection>
+            )}
+
+            {!isOwnProfile && !canViewRemote && (
                 <div style={sectionStyle}>
                     <p style={{ marginTop: 0 }}>You do not currently have permission to view this profile config.</p>
                     <button
@@ -2128,16 +2159,14 @@ function ConfigPanel(props: any) {
                 </div>
             )}
 
-            {!isPanelCollapsed && ((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && (
+            {((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && (
                 <>
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Gag</h4>
-                        <div style={{ marginTop: "8px" }}>{renderTimeoutControls("gag_end", "Gag timeout")}</div>
-                    </div>
+                    <CollapsibleSection id="gag" title="Gag">
+                        <div style={{ marginTop: "6px" }}>{renderTimeoutControls("gag_end", "Gag timeout")}</div>
+                    </CollapsibleSection>
 
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Pet</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
+                    <CollapsibleSection id="pet" title="Pet">
+                        <div style={{ display: "grid", gap: "6px", marginTop: "6px" }}>
                             {renderTimeoutControls("pet_end", "Pet timeout")}
                             <label>
                                 Pet type
@@ -2182,27 +2211,24 @@ function ConfigPanel(props: any) {
                                 />
                             </label>
                         </div>
-                    </div>
+                    </CollapsibleSection>
 
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Bimbo</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
+                    <CollapsibleSection id="bimbo" title="Bimbo">
+                        <div style={{ display: "grid", gap: "6px", marginTop: "6px" }}>
                             {renderTimeoutControls("bimbo_end", "Bimbo timeout")}
                             <label>Bimbo word length<input style={inputStyle} type="number" min={1} value={editableConfig.config.bimbo_word_length} onChange={e => {
                                 const nextValue = e.currentTarget.value;
                                 setEditableConfig(prev => ({ ...prev, config: { ...prev.config, bimbo_word_length: parseNumericInput(nextValue, prev.config.bimbo_word_length, { min: 1 }) } }));
                             }} /></label>
                         </div>
-                    </div>
+                    </CollapsibleSection>
 
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Horny</h4>
-                        <div style={{ marginTop: "8px" }}>{renderTimeoutControls("horny_end", "Horny timeout")}</div>
-                    </div>
+                    <CollapsibleSection id="horny" title="Horny">
+                        <div style={{ marginTop: "6px" }}>{renderTimeoutControls("horny_end", "Horny timeout")}</div>
+                    </CollapsibleSection>
 
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Drone</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
+                    <CollapsibleSection id="drone" title="Drone">
+                        <div style={{ display: "grid", gap: "6px", marginTop: "6px" }}>
                             {renderTimeoutControls("drone_end", "Drone timeout")}
                             <label>Drone term<input style={inputStyle} value={editableConfig.drone_config.drone_term} onChange={e => {
                                 const nextValue = e.currentTarget.value;
@@ -2241,16 +2267,14 @@ function ConfigPanel(props: any) {
                                 setEditableConfig(prev => ({ ...prev, drone_config: { ...prev.drone_config, loud_footer: nextValue } }));
                             }} /></label>
                         </div>
-                    </div>
+                    </CollapsibleSection>
 
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>UWU</h4>
-                        <div style={{ marginTop: "8px" }}>{renderTimeoutControls("uwu_end", "UWU timeout")}</div>
-                    </div>
+                    <CollapsibleSection id="uwu" title="UWU">
+                        <div style={{ marginTop: "6px" }}>{renderTimeoutControls("uwu_end", "UWU timeout")}</div>
+                    </CollapsibleSection>
 
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Censored</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
+                    <CollapsibleSection id="censored" title="Censored">
+                        <div style={{ display: "grid", gap: "6px", marginTop: "6px" }}>
                             {renderTimeoutControls("censored_end", "Censored timeout")}
                             <label>Censored replacement<input style={inputStyle} value={editableConfig.config.censored_replacement} onChange={e => {
                                 const nextValue = e.currentTarget.value;
@@ -2258,11 +2282,10 @@ function ConfigPanel(props: any) {
                             }} /></label>
                             <label>Censored words (one per line)<textarea style={{ ...inputStyle, minHeight: "90px" }} value={censoredWordsText} onChange={e => setCensoredWordsText(e.currentTarget.value)} /></label>
                         </div>
-                    </div>
+                    </CollapsibleSection>
 
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Custom Rules</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
+                    <CollapsibleSection id="custom-rules" title="Custom Rules">
+                        <div style={{ display: "grid", gap: "6px", marginTop: "6px" }}>
                             <p style={{ margin: 0, color: "#b5bac1" }}>{editableConfig.rules_groups.length} group(s), {editableConfig.rules.length} rule(s)</p>
                             <button style={buttonStyle} onClick={() => setIsRulesEditorOpen(true)}>Open rules editor popup</button>
                             <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -2277,7 +2300,7 @@ function ConfigPanel(props: any) {
                                 Debug mode
                             </label>
                         </div>
-                    </div>
+                    </CollapsibleSection>
 
                     <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                         <button style={buttonStyle} onClick={() => refresh().then(() => setStatus("Reloaded config")).catch(err => setStatus(String(err)))}>Reload</button>
@@ -2285,7 +2308,7 @@ function ConfigPanel(props: any) {
                 </>
             )}
 
-            {!isPanelCollapsed && ((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && isRulesEditorOpen && (
+            {((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && isRulesEditorOpen && (
                 ReactDOM.createPortal(<div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 9999, display: "grid", placeItems: "center", padding: "20px" }}>
                     <div style={{ width: "min(980px, 95vw)", maxHeight: "90vh", overflow: "auto", ...sectionStyle, background: "#1e1f22", display: "grid", gap: "10px" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
@@ -2411,11 +2434,10 @@ function ConfigPanel(props: any) {
                 </div>, document.body)
             )}
 
-            {!isPanelCollapsed && isOwnProfile && (
+            {isOwnProfile && (
             <>
-                <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Scope Filter</h4>
-                        <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
+                <CollapsibleSection id="scope-filter" title="Scope Filter">
+                        <div style={{ display: "grid", gap: "6px", marginTop: "6px" }}>
                             <label>
                                 Filter mode
                                 <select
@@ -2433,7 +2455,7 @@ function ConfigPanel(props: any) {
                             <p style={{ margin: 0, color: "#b5bac1" }}>
                                 Use the server or DM right-click menu to add/remove entries from the shared scope list.
                             </p>
-                            <ul style={{ marginBottom: 0 }}>
+                            <ul style={{ margin: "6px 0 0 0", paddingLeft: "18px" }}>
                                 {getSharedScopeList(editableConfig).map((item, index) => (
                                     <li key={`${item.discord_id}-${item.server_name}-${index}`} style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
                                         <span>{item.server_name || item.discord_id}</span>
@@ -2452,10 +2474,9 @@ function ConfigPanel(props: any) {
                                 ))}
                             </ul>
                         </div>
-                    </div>
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Allowed Editors</h4>
-                        <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+                    </CollapsibleSection>
+                    <CollapsibleSection id="allowed-editors" title="Allowed Editors">
+                        <div style={{ display: "flex", gap: "6px", marginTop: "6px" }}>
                             <input
                                 placeholder="Discord ID"
                                 value={newEditorId}
@@ -2478,7 +2499,7 @@ function ConfigPanel(props: any) {
                                 Add
                             </button>
                         </div>
-                        <ul style={{ marginBottom: 0 }}>
+                        <ul style={{ margin: "6px 0 0 0", paddingLeft: "18px" }}>
                             {allowedEditors.map(editor => (
                                 <li key={editor} style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
                                     <span>{editor}</span>
@@ -2499,11 +2520,10 @@ function ConfigPanel(props: any) {
                                 </li>
                             ))}
                         </ul>
-                    </div>
+                    </CollapsibleSection>
 
-                    <div style={sectionStyle}>
-                        <h4 style={sectionHeaderStyle}>Pending Requests</h4>
-                        <ul style={{ marginBottom: 0 }}>
+                    <CollapsibleSection id="pending-requests" title="Pending Requests">
+                        <ul style={{ margin: "6px 0 0 0", paddingLeft: "18px" }}>
                             {pendingRequests.length === 0 && <li>No pending requests</li>}
                             {pendingRequests.map(requesterId => (
                                 <li key={requesterId} style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
@@ -2541,11 +2561,14 @@ function ConfigPanel(props: any) {
                                 </li>
                             ))}
                         </ul>
-                    </div>
+                    </CollapsibleSection>
                 </>
             )}
 
-            <p style={{ margin: 0, color: "#b5bac1" }}>{status}</p>
+            </>
+            )}
+
+            {(!isPanelCollapsed || status) && <p style={{ margin: 0, color: "#b5bac1" }}>{status}</p>}
         </div>
     );
 }
@@ -2560,6 +2583,10 @@ const settings = definePluginSettings({
         type: OptionType.STRING,
         description: "Loopback transport mode: auto, desktop_http, or in_app_mobile",
         default: "auto"
+    },
+    collapsedSections: {
+        type: OptionType.CUSTOM,
+        default: {} as Record<string, boolean>
     }
 });
 
