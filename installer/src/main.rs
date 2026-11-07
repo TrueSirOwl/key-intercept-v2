@@ -649,25 +649,24 @@ fn pnpm_install_args() -> [&'static str; 2] {
 
 fn find_local_sources(loopback_binary_name: &str, plugin_file_name: &str) -> Option<LocalSources> {
     let cwd = env::current_dir().ok()?;
-    if let Some(artifact_sources) =
-        local_artifacts_from_dir(&cwd, loopback_binary_name, plugin_file_name)
-    {
-        return Some(artifact_sources);
-    }
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .filter(|dir| dir != &cwd);
 
-    if let Ok(exe_path) = env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            if exe_dir != cwd.as_path() {
-                if let Some(artifact_sources) =
-                    local_artifacts_from_dir(exe_dir, loopback_binary_name, plugin_file_name)
-                {
-                    return Some(artifact_sources);
-                }
-            }
+    let mut partial_artifacts = None;
+    for dir in std::iter::once(cwd.as_path()).chain(exe_dir.as_deref()) {
+        let Some(sources) = local_artifacts_from_dir(dir, loopback_binary_name, plugin_file_name)
+        else {
+            continue;
+        };
+        if matches!(sources, LocalSources::ArtifactDirectory { plugin_file: Some(_), .. }) {
+            return Some(sources);
         }
+        partial_artifacts.get_or_insert(sources);
     }
 
-    for dir in cwd.ancestors() {
+    for dir in cwd.ancestors().chain(exe_dir.iter().flat_map(|d| d.ancestors())) {
         let loopback_manifest = dir.join("loopback-server/Cargo.toml");
         let plugin_file = dir.join("plugin/keyInterceptSelfHosted.tsx");
         if loopback_manifest.is_file() && plugin_file.is_file() {
@@ -677,7 +676,7 @@ fn find_local_sources(loopback_binary_name: &str, plugin_file_name: &str) -> Opt
             });
         }
     }
-    None
+    partial_artifacts
 }
 
 fn local_artifacts_from_dir(
