@@ -197,11 +197,33 @@ NormalizedString.prototype.replace = function (regex, fn) {
     while ((match = regexWithIndices.exec(this.nfkdStr)) != null) {
         const postStart = match.index;
         const postEnd = postStart + match[0].length;
-        const [preStart, preEnd] = this.convert(postStart, postEnd);
-        this.str = this.str.substring(0, preStart) + fn(match[0]) + this.str.substring(preEnd);
+        const isEmpty = postStart === postEnd;
+        const [preStart, preEnd] = isEmpty ? [this.toPre(postStart), this.toPre(postStart)] : this.convert(postStart, postEnd);
+        const replacement = fn(match[0]);
+        this.str = this.str.substring(0, preStart) + replacement + this.str.substring(preEnd);
         this.rebuild();
+        // Resume after the inserted text so a replacement containing a match isn't matched
+        // again forever, and step past empty matches, which exec() never advances over.
+        const resumeAt = this.toPost(preStart + replacement.length);
+        regexWithIndices.lastIndex = isEmpty ? resumeAt + 1 : resumeAt;
     }
     return this.str;
+};
+
+// Original-string offset of the first character starting at or after a normalized offset.
+NormalizedString.prototype.toPre = function (post) {
+    for (const index of this.indices) {
+        if (index.post[0] >= post) return index.pre[0];
+    }
+    return this.str.length;
+};
+
+// Normalized-string offset of the first character starting at or after an original offset.
+NormalizedString.prototype.toPost = function (pre) {
+    for (const index of this.indices) {
+        if (index.pre[0] >= pre) return index.post[0];
+    }
+    return this.nfkdStr.length;
 };
 
 NormalizedString.prototype.rebuild = function () {

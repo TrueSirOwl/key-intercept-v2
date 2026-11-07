@@ -5,7 +5,7 @@
   "main": "keyInterceptSelfHosted.tsx",
   "type": "module",
   "scripts": {
-    "test": "node ./test/smoke.test.mjs"
+    "test": "node ./test/smoke.test.mjs && node --no-warnings ./test/normalized-string.test.mjs"
   },
   "license": "MIT"
 }

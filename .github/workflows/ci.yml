@@ -24,6 +24,11 @@ jobs:
       - name: Run Rust checks
         run: cargo check -p loopback-core -p loopback-server -p relay-server -p key-intercept-installer
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Run plugin tests
         run: npm --prefix plugin test
 
