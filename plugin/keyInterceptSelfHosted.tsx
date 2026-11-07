@@ -8,6 +8,7 @@ const LOOPBACK = "http://127.0.0.1:35491";
 const DISCORD_SECURE_ORIGINS = new Set(["https://discord.com", "https://ptb.discord.com", "https://canary.discord.com"]);
 const LOG_PREFIX = "[key-intercept]";
 const MOBILE_STATE_KEY = "key-intercept/mobile-loopback-state/v1";
+const PANEL_COLLAPSED_KEY = "key-intercept/panel-collapsed";
 const DEVELOPER_MODE_ENABLED = (() => {
     const values: unknown[] = [];
     try {
@@ -1652,6 +1653,20 @@ function ConfigPanel(props: any) {
     const [isRulesEditorOpen, setIsRulesEditorOpen] = React.useState(false);
     const [nowMs, setNowMs] = React.useState(() => Date.now());
     const [canViewRemote, setCanViewRemote] = React.useState(isOwnProfile);
+    const [isPanelCollapsed, setIsPanelCollapsed] = React.useState(() => {
+        try {
+            return getStorageBackend()?.getItem(PANEL_COLLAPSED_KEY) === "true";
+        } catch {
+            return false;
+        }
+    });
+    React.useEffect(() => {
+        try {
+            getStorageBackend()?.setItem(PANEL_COLLAPSED_KEY, String(isPanelCollapsed));
+        } catch {
+            // ignore: collapse state is a convenience only
+        }
+    }, [isPanelCollapsed]);
     const skipAutosaveRef = React.useRef(true);
     const lastSavedSnapshotRef = React.useRef("");
     const saveQueueRef = React.useRef(Promise.resolve());
@@ -2042,7 +2057,17 @@ function ConfigPanel(props: any) {
             onClick={stopMousePropagation}
         >
             <div style={{ ...sectionStyle, background: "#2b2d31" }}>
-                <h3 style={{ margin: 0 }}>key-intercept control center</h3>
+                <button
+                    type="button"
+                    aria-expanded={!isPanelCollapsed}
+                    onClick={() => setIsPanelCollapsed(prev => !prev)}
+                    style={{ all: "unset", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}
+                >
+                    <h3 style={{ margin: 0 }}>key-intercept control center</h3>
+                    <span style={{ fontSize: "12px", color: "#b5bac1", transform: isPanelCollapsed ? "rotate(0deg)" : "rotate(180deg)", transition: "transform 0.2s ease" }}>
+                        ▼
+                    </span>
+                </button>
                 <p style={{ margin: "6px 0 0 0", color: "#b5bac1" }}>
                     {!isOwnProfile ?`Viewing profile ${profileUserId}`:
                     blocked_by_dom ? "Your profile configuration is locked" : "Your profile configuration" }
@@ -2079,7 +2104,7 @@ function ConfigPanel(props: any) {
                     )}
             </div>
 
-            {!isOwnProfile && !canViewRemote && (
+            {!isPanelCollapsed && !isOwnProfile && !canViewRemote && (
                 <div style={sectionStyle}>
                     <p style={{ marginTop: 0 }}>You do not currently have permission to view this profile config.</p>
                     <button
@@ -2103,7 +2128,7 @@ function ConfigPanel(props: any) {
                 </div>
             )}
 
-            {((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && (
+            {!isPanelCollapsed && ((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && (
                 <>
                     <div style={sectionStyle}>
                         <h4 style={sectionHeaderStyle}>Gag</h4>
@@ -2260,7 +2285,7 @@ function ConfigPanel(props: any) {
                 </>
             )}
 
-            {((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && isRulesEditorOpen && (
+            {!isPanelCollapsed && ((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && isRulesEditorOpen && (
                 <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 9999, display: "grid", placeItems: "center", padding: "20px" }}>
                     <div style={{ width: "min(980px, 95vw)", maxHeight: "90vh", overflow: "auto", ...sectionStyle, background: "#1e1f22", display: "grid", gap: "10px" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
@@ -2386,7 +2411,7 @@ function ConfigPanel(props: any) {
                 </div>
             )}
 
-            {isOwnProfile && (
+            {!isPanelCollapsed && isOwnProfile && (
             <>
                 <div style={sectionStyle}>
                         <h4 style={sectionHeaderStyle}>Scope Filter</h4>
