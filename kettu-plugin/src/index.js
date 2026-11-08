@@ -177,6 +177,14 @@ function formatCountdown(msRemaining) {
     return parts.join(" ");
 }
 
+// Adds time to a timeout. A running timeout is extended; an expired, invalid or permanent one
+// starts from now (extending "permanent" would only push year 9999 further out).
+function extendTimeout(endIso, nowMs, seconds) {
+    const endMs = Date.parse(endIso);
+    const isRunning = Number.isFinite(endMs) && endMs > nowMs && endMs < permanentTimestamp - 1000;
+    return new Date((isRunning ? endMs : nowMs) + seconds * 1000).toISOString();
+}
+
 function formatTimeoutStatus(endIso, nowMs) {
     const endMs = Date.parse(endIso);
     if (!Number.isFinite(endMs)) return "Invalid timestamp";
@@ -197,11 +205,33 @@ NormalizedString.prototype.replace = function (regex, fn) {
     while ((match = regexWithIndices.exec(this.nfkdStr)) != null) {
         const postStart = match.index;
         const postEnd = postStart + match[0].length;
-        const [preStart, preEnd] = this.convert(postStart, postEnd);
-        this.str = this.str.substring(0, preStart) + fn(match[0]) + this.str.substring(preEnd);
+        const isEmpty = postStart === postEnd;
+        const [preStart, preEnd] = isEmpty ? [this.toPre(postStart), this.toPre(postStart)] : this.convert(postStart, postEnd);
+        const replacement = fn(match[0]);
+        this.str = this.str.substring(0, preStart) + replacement + this.str.substring(preEnd);
         this.rebuild();
+        // Resume after the inserted text so a replacement containing a match isn't matched
+        // again forever, and step past empty matches, which exec() never advances over.
+        const resumeAt = this.toPost(preStart + replacement.length);
+        regexWithIndices.lastIndex = isEmpty ? resumeAt + 1 : resumeAt;
     }
     return this.str;
+};
+
+// Original-string offset of the first character starting at or after a normalized offset.
+NormalizedString.prototype.toPre = function (post) {
+    for (const index of this.indices) {
+        if (index.post[0] >= post) return index.pre[0];
+    }
+    return this.str.length;
+};
+
+// Normalized-string offset of the first character starting at or after an original offset.
+NormalizedString.prototype.toPost = function (pre) {
+    for (const index of this.indices) {
+        if (index.pre[0] >= pre) return index.post[0];
+    }
+    return this.nfkdStr.length;
 };
 
 NormalizedString.prototype.rebuild = function () {
@@ -2255,9 +2285,7 @@ function ConfigPanel(props) {
             setStatus(`Enter a positive number for ${field}`);
             return;
         }
-        const currentEndMs = Date.parse(editableConfig.config[field]);
-        const baseline = Number.isFinite(currentEndMs) && currentEndMs > nowMs ? currentEndMs : nowMs;
-        const nextIso = new Date(baseline + amount * multiplierSeconds * 1000).toISOString();
+        const nextIso = extendTimeout(editableConfig.config[field], nowMs, amount * multiplierSeconds);
         setTimeoutValue(field, nextIso);
         setStatus(`${field}: ${formatTimeoutStatus(nextIso, nowMs)}`);
     }, [editableConfig.config, nowMs, setTimeoutValue, timeoutAdjustments]);
@@ -2291,12 +2319,7 @@ function ConfigPanel(props) {
             ...prev,
             rules_groups: prev.rules_groups.map(group => {
                 if (group.id !== groupId) return group;
-                const currentEndMs = Date.parse(group.timeout_end);
-                const baseline = Number.isFinite(currentEndMs) && currentEndMs > nowMs ? currentEndMs : nowMs;
-                return {
-                    ...group,
-                    timeout_end: new Date(baseline + amount * multiplierSeconds * 1000).toISOString()
-                };
+                return { ...group, timeout_end: extendTimeout(group.timeout_end, nowMs, amount * multiplierSeconds) };
             })
         }));
     }, [groupTimeoutAdjustments, nowMs]);
