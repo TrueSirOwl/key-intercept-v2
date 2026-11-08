@@ -1189,6 +1189,21 @@ function shouldApplyCensored(config: Config): boolean {
     return shouldApply(config.censored_end);
 }
 
+// Shared by applyRules and the rules editor so the editor flags exactly what would fail at runtime.
+function compileRuleRegex(source: string, flags = ""): RegExp {
+    return new RegExp(source.replaceAll("\\\\", "\\"), flags);
+}
+
+function getRuleRegexError(source: string): string {
+    if (!source) return "";
+    try {
+        compileRuleRegex(source, "gi");
+        return "";
+    } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+    }
+}
+
 function applyRules(msg: string): string {
     if (!shouldApplyRules(interceptConfig.config)) return msg;
 
@@ -1204,7 +1219,7 @@ function applyRules(msg: string): string {
 
         for (const rule of sortedRules) {
             if (!rule.rule_regex) continue;
-            const temp = new RegExp(rule.rule_regex.toString().replaceAll("\\\\", "\\"));
+            const temp = compileRuleRegex(rule.rule_regex);
             const matchCallback = (match: string): string => {
                 if (Math.random() > rule.chance_to_apply) return match;
                 return match.replace(new RegExp(temp, "i"), rule.rule_replacement);
@@ -1674,7 +1689,43 @@ const sectionHeaderStyle: React.CSSProperties = {
 };
 // A stylesheet (not inline styles) so the toggle can keep a :focus-visible ring.
 const COLLAPSE_TOGGLE_CLASS = "key-intercept-collapse-toggle";
+// Moves sorted[from] to just before/after sorted[target]. Returns null when there is nothing to move.
+function placeInOrder<T>(sorted: T[], from: number, target: number, placeAfter: boolean): T[] | null {
+    if (from < 0 || target < 0 || from === target) return null;
+    const next = [...sorted];
+    const [moved] = next.splice(from, 1);
+    const targetAfterRemoval = target - (from < target ? 1 : 0);
+    next.splice(targetAfterRemoval + (placeAfter ? 1 : 0), 0, moved);
+    return next;
+}
+
+// Rules editor reordering: cards carry data-flip-key ("g-<group id>" / "r-<rule key>") so moves can be
+// animated (FLIP) and dragged. The custom MIME type keeps a drop elsewhere in Discord from inserting text.
+const FLIP_KEY_ATTR = "data-flip-key";
+const RULE_DRAG_MIME = "application/x-key-intercept-reorder";
+
+// Rules editor layers, darkest to lightest (Discord's own shades): popup #1e1f22 > group > rule.
+const GROUP_BG = "#2b2d31";
+const RULE_BG = "#313338";
+// Text input that reads as plain text until hovered or focused (used for the editable group name).
+const INLINE_INPUT_CLASS = "key-intercept-inline-input";
+// Animated open/close of a rule group's rules: the grid row animates 0fr <-> 1fr, which tweens to the
+// content's natural height. visibility flips after the close animation (and before the open one), so
+// collapsed rules can't be tabbed into. The -8px margin cancels the parent's grid gap; the spacing is
+// re-added inside the clipped box, so a closed group leaves no empty strip.
+const RULES_COLLAPSE_CLASS = "key-intercept-rules-collapse";
+// Rule group header: buttons and inputs take the header's text size instead of the browser's small default.
+const GROUP_HEADER_CLASS = "key-intercept-group-header";
 const COLLAPSE_TOGGLE_CSS = `
+.${RULES_COLLAPSE_CLASS} { display: grid; grid-template-rows: 1fr; margin-top: -8px; transition: grid-template-rows 160ms ease-out, visibility 160ms; }
+.${RULES_COLLAPSE_CLASS}[data-collapsed="true"] { grid-template-rows: 0fr; visibility: hidden; }
+.${RULES_COLLAPSE_CLASS} > div { overflow: hidden; min-height: 0; }
+@media (prefers-reduced-motion: reduce) { .${RULES_COLLAPSE_CLASS} { transition: none; } }
+.${GROUP_HEADER_CLASS} button, .${GROUP_HEADER_CLASS} input { font-size: inherit; }
+.${GROUP_HEADER_CLASS} .${COLLAPSE_TOGGLE_CLASS}:hover { background: rgba(255, 255, 255, 0.08); }
+.${INLINE_INPUT_CLASS} { flex: 0 1 auto; min-width: 0; max-width: 100%; box-sizing: border-box; background: transparent; color: #f2f3f5; font-weight: 700; padding: 2px 6px; border: 1px solid transparent; border-radius: 4px; }
+.${INLINE_INPUT_CLASS}:hover { border-color: #3f4147; }
+.${INLINE_INPUT_CLASS}:focus { border-color: #5865f2; background: #1e1f22; outline: none; }
 .${COLLAPSE_TOGGLE_CLASS} { all: unset; cursor: pointer; display: flex; justify-content: space-between; align-items: center; width: 100%; box-sizing: border-box; border-radius: 4px; }
 .${COLLAPSE_TOGGLE_CLASS}:focus-visible { outline: 2px solid #5865f2; outline-offset: 2px; }
 `;
@@ -1734,6 +1785,19 @@ function ConfigPanel(props: any) {
     );
     const [groupTimeoutAdjustments, setGroupTimeoutAdjustments] = React.useState<Record<number, string>>({});
     const [isRulesEditorOpen, setIsRulesEditorOpen] = React.useState(false);
+    const [collapsedRuleGroups, setCollapsedRuleGroups] = React.useState<Record<number, boolean>>({});
+    const [advancedRuleGroups, setAdvancedRuleGroups] = React.useState<Record<number, boolean>>({});
+    const rulesEditorScrollRef = React.useRef<HTMLDivElement>(null);
+    const flipSnapshotRef = React.useRef<Map<string, number> | null>(null);
+    const dragSourceRef = React.useRef<{ kind: "g" | "r"; key: string; groupId: number; id: number; } | null>(null);
+    const [draggingKey, setDraggingKey] = React.useState<string | null>(null);
+    const [dropIndicator, setDropIndicator] = React.useState<{ key: string; after: boolean; } | null>(null);
+    const rulesEditorDialogRef = React.useRef<HTMLDivElement>(null);
+    // Rules have no id, so keys live in a list parallel to editableConfig.rules. It survives
+    // autosave reloads (same rules, same positions) and is spliced on removal, so inputs keep
+    // their focus and state instead of shifting onto a neighbouring rule.
+    const ruleKeysRef = React.useRef<number[]>([]);
+    const nextRuleKeyRef = React.useRef(0);
     const [nowMs, setNowMs] = React.useState(() => Date.now());
     const [canViewRemote, setCanViewRemote] = React.useState(isOwnProfile);
     const [isPanelCollapsed, togglePanelCollapsed] = usePersistedCollapsed(PANEL_COLLAPSED_KEY);
@@ -1967,11 +2031,47 @@ function ConfigPanel(props: any) {
     }, []);
 
     const removeRuleGroup = React.useCallback((groupId: number) => {
+        ruleKeysRef.current = ruleKeysRef.current.filter((_, index) => editableConfig.rules[index]?.group_id !== groupId);
         setEditableConfig(prev => ({
             ...prev,
             rules_groups: prev.rules_groups.filter(group => group.id !== groupId),
             rules: prev.rules.filter(rule => rule.group_id !== groupId)
         }));
+    }, [editableConfig.rules]);
+
+    // Both renumber the whole list (0, 1, 2, ...) so duplicate or gapped order values can't make a move a no-op.
+    const reorderRuleGroup = React.useCallback((groupId: number, targetGroupId: number, placeAfter: boolean) => {
+        setEditableConfig(prev => {
+            const sorted = [...prev.rules_groups].sort((a, b) => a.order - b.order);
+            const next = placeInOrder(sorted, sorted.findIndex(group => group.id === groupId), sorted.findIndex(group => group.id === targetGroupId), placeAfter);
+            if (!next) return prev;
+            const orderById = new Map(next.map((group, order) => [group.id, order]));
+            return {
+                ...prev,
+                rules_groups: prev.rules_groups.map(group => ({ ...group, order: orderById.get(group.id) ?? group.order }))
+            };
+        });
+    }, []);
+
+    // Rules only move within their own group; a target in another group is ignored.
+    const reorderRule = React.useCallback((ruleIndex: number, targetIndex: number, placeAfter: boolean) => {
+        setEditableConfig(prev => {
+            const groupId = prev.rules[ruleIndex]?.group_id;
+            const siblings = prev.rules
+                .map((rule, index) => ({ rule, index }))
+                .filter(item => item.rule.group_id === groupId)
+                .sort((a, b) => a.rule.order - b.rule.order);
+            const next = placeInOrder<{ rule: Rule; index: number; }>(siblings, siblings.findIndex(item => item.index === ruleIndex), siblings.findIndex(item => item.index === targetIndex), placeAfter);
+            if (!next) return prev;
+            const orderByIndex = new Map(next.map((item, order) => [item.index, order]));
+            return {
+                ...prev,
+                rules: prev.rules.map((rule, index) => {
+                    const order = orderByIndex.get(index);
+                    return order === undefined ? rule : { ...rule, order };
+                })
+            };
+        });
     }, []);
 
     const updateRuleGroup = React.useCallback((groupId: number, updater: (group: RuleGroup) => RuleGroup) => {
@@ -2012,6 +2112,7 @@ function ConfigPanel(props: any) {
     }, []);
 
     const removeRuleAtIndex = React.useCallback((ruleIndex: number) => {
+        ruleKeysRef.current.splice(ruleIndex, 1);
         setEditableConfig(prev => ({
             ...prev,
             rules: prev.rules.filter((_, index) => index !== ruleIndex)
@@ -2114,6 +2215,181 @@ function ConfigPanel(props: any) {
             </div>
         </div>
     );
+
+    // Focus the dialog so Escape reaches its onKeyDown without the user clicking into it first.
+    React.useEffect(() => {
+        if (isRulesEditorOpen) rulesEditorDialogRef.current?.focus();
+    }, [isRulesEditorOpen]);
+
+    // FLIP: after a reorder renders, slide each moved card from where it was to where it is now.
+    React.useLayoutEffect(() => {
+        const before = flipSnapshotRef.current;
+        if (!before) return;
+        flipSnapshotRef.current = null;
+        if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+        rulesEditorScrollRef.current?.querySelectorAll<HTMLElement>(`[${FLIP_KEY_ATTR}]`).forEach(el => {
+            const previousTop = before.get(el.getAttribute(FLIP_KEY_ATTR)!);
+            if (previousTop === undefined) return;
+            const dy = previousTop - el.getBoundingClientRect().top;
+            if (Math.abs(dy) < 1) return;
+            el.animate([{ transform: `translateY(${dy}px)` }, { transform: "translateY(0)" }], { duration: 180, easing: "ease-out" });
+        });
+    });
+
+    const ruleKeys = ruleKeysRef.current;
+    if (ruleKeys.length > editableConfig.rules.length) ruleKeys.length = editableConfig.rules.length;
+    while (ruleKeys.length < editableConfig.rules.length) ruleKeys.push(nextRuleKeyRef.current++);
+
+    const dangerButtonStyle: React.CSSProperties = { ...buttonStyle, background: "#da373c", borderColor: "#da373c" };
+    const closeRulesEditor = () => setIsRulesEditorOpen(false);
+
+    // Records where the cards of one kind are, then applies the reorder; the layout effect animates the difference.
+    // Only one kind is recorded so rules don't double-move when their whole group slides.
+    const animateReorder = (kind: "g" | "r", change: () => void) => {
+        const snapshot = new Map<string, number>();
+        rulesEditorScrollRef.current?.querySelectorAll<HTMLElement>(`[${FLIP_KEY_ATTR}^="${kind}-"]`).forEach(el => {
+            snapshot.set(el.getAttribute(FLIP_KEY_ATTR)!, el.getBoundingClientRect().top);
+        });
+        flipSnapshotRef.current = snapshot;
+        change();
+    };
+
+    const endDrag = () => {
+        dragSourceRef.current = null;
+        setDraggingKey(null);
+        setDropIndicator(null);
+    };
+
+    // A card only becomes draggable while its handle is held, so text selection in its inputs keeps working.
+    const armDrag = (e: React.MouseEvent<HTMLElement>) => {
+        const card = e.currentTarget.closest<HTMLElement>(`[${FLIP_KEY_ATTR}]`);
+        if (!card) return;
+        card.draggable = true;
+        document.addEventListener("mouseup", () => { card.draggable = false; }, { once: true });
+    };
+
+    // Drag & drop props for a group ("g") or rule ("r") card. Rules only accept rules from the same group.
+    const reorderDragProps = (kind: "g" | "r", key: string, groupId: number, id: number, dropOnto: (sourceId: number, placeAfter: boolean) => void) => {
+        const flipKey = `${kind}-${key}`;
+        const accepts = () => {
+            const source = dragSourceRef.current;
+            return source && source.kind === kind && (kind === "g" || source.groupId === groupId) ? source : null;
+        };
+        const isLowerHalf = (e: React.DragEvent<HTMLElement>) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            return e.clientY > rect.top + rect.height / 2;
+        };
+        return {
+            [FLIP_KEY_ATTR]: flipKey,
+            onDragStart: (e: React.DragEvent<HTMLElement>) => {
+                if (e.target !== e.currentTarget) return; // a rule drag bubbling through its group
+                e.stopPropagation();
+                dragSourceRef.current = { kind, key, groupId, id };
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData(RULE_DRAG_MIME, flipKey);
+                setDraggingKey(flipKey);
+            },
+            onDragOver: (e: React.DragEvent<HTMLElement>) => {
+                const source = accepts();
+                if (!source) return;
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = "move";
+                const after = isLowerHalf(e);
+                setDropIndicator(prev => (
+                    source.key === key ? null : prev?.key === flipKey && prev.after === after ? prev : { key: flipKey, after }
+                ));
+            },
+            onDrop: (e: React.DragEvent<HTMLElement>) => {
+                const source = accepts();
+                if (!source) return;
+                e.preventDefault();
+                e.stopPropagation();
+                if (source.key !== key) dropOnto(source.id, isLowerHalf(e));
+                endDrag();
+            },
+            onDragEnd: (e: React.DragEvent<HTMLElement>) => {
+                e.currentTarget.draggable = false;
+                endDrag();
+            }
+        };
+    };
+
+    // Visual state of a card while dragging: the dragged card fades, the drop target shows a line on the side it will land.
+    const reorderDragStyle = (flipKey: string): React.CSSProperties => ({
+        ...(draggingKey === flipKey ? { opacity: 0.4 } : {}),
+        ...(dropIndicator?.key === flipKey ? { boxShadow: `0 ${dropIndicator.after ? 3 : -3}px 0 0 #5865f2` } : {})
+    });
+    // Opening/closing a group animates its height. Keep its header where it was on screen for the
+    // whole animation (a pinned header would otherwise be carried off-screen when its group shrinks),
+    // so the cursor stays over the toggle.
+    const toggleRuleGroupCollapsed = (groupId: number, trigger: HTMLElement) => {
+        setCollapsedRuleGroups(prev => ({ ...prev, [groupId]: !prev[groupId] }));
+        const header = trigger.closest(`.${GROUP_HEADER_CLASS}`);
+        const scroller = rulesEditorScrollRef.current;
+        if (!header || !scroller) return;
+        const anchorTop = header.getBoundingClientRect().top;
+        const stopAt = performance.now() + 250;
+        const keepHeaderInPlace = () => {
+            scroller.scrollTop += header.getBoundingClientRect().top - anchorTop;
+            if (performance.now() < stopAt) requestAnimationFrame(keepHeaderInPlace);
+        };
+        requestAnimationFrame(keepHeaderInPlace);
+    };
+    const smallButtonStyle: React.CSSProperties = { ...buttonStyle, padding: "3px 8px" };
+    // Green "Enabled" / red "Disabled" toggle, shared by rule groups and rules.
+    const renderEnabledToggle = (label: string, enabled: boolean, onToggle: () => void) => (
+        <button
+            type="button"
+            aria-pressed={enabled}
+            aria-label={`${label} enabled`}
+            onClick={onToggle}
+            style={{
+                ...smallButtonStyle,
+                minWidth: "80px",
+                fontWeight: 600,
+                background: enabled ? "#248046" : "#da373c",
+                borderColor: enabled ? "#248046" : "#da373c"
+            }}
+        >
+            {enabled ? "Enabled" : "Disabled"}
+        </button>
+    );
+    // order number, ↑, ↓. The number is the stored order value as plain text; only the arrows change it.
+    const renderOrderControls = (label: string, order: number, isFirst: boolean, isLast: boolean, move: (direction: -1 | 1) => void) => {
+        const arrowStyle = (disabled: boolean): React.CSSProperties => ({
+            ...buttonStyle,
+            padding: "3px 8px",
+            opacity: disabled ? 0.4 : 1,
+            cursor: disabled ? "default" : "pointer"
+        });
+        return (
+            // marginLeft auto pushes the controls (and anything after them) to the right edge of the row.
+            <div role="group" aria-label={`${label} order`} style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "4px" }}>
+                {/* Knurled grip (2x3 dot grid). Padding widens the grab area; the dots stay inside the content box. */}
+                <span
+                    aria-hidden="true"
+                    title={`Drag to reorder ${label}`}
+                    onMouseDown={armDrag}
+                    style={{
+                        width: "10px",
+                        height: "15px",
+                        padding: "4px 6px",
+                        cursor: "grab",
+                        backgroundImage: "radial-gradient(circle, #b5bac1 1.1px, transparent 1.6px)",
+                        backgroundSize: "5px 5px",
+                        backgroundOrigin: "content-box",
+                        backgroundClip: "content-box"
+                    }}
+                />
+                <span style={{ minWidth: "1.5em", textAlign: "right", fontSize: "0.8em", color: "#b5bac1" }}>{order}</span>
+                <button style={arrowStyle(isFirst)} disabled={isFirst} aria-label={`Move ${label} up`} onClick={() => move(-1)}>↑</button>
+                <button style={arrowStyle(isLast)} disabled={isLast} aria-label={`Move ${label} down`} onClick={() => move(1)}>↓</button>
+            </div>
+        );
+    };
+    // Shared by the per-group column headings and each rule row so they line up.
+    const ruleColumnsStyle: React.CSSProperties = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 1em minmax(0, 1fr)", gap: "8px" };
 
     return (
         <div
@@ -2345,112 +2621,184 @@ function ConfigPanel(props: any) {
             )}
 
             {((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && isRulesEditorOpen && (
-                ReactDOM.createPortal(<div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", color: "#f2f3f5", zIndex: 9999, display: "grid", placeItems: "center", padding: "20px" }}>
-                    <div style={{ width: "min(980px, 95vw)", maxHeight: "90vh", overflow: "auto", ...sectionStyle, background: "#1e1f22", display: "grid", gap: "10px" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
-                            <h4 style={sectionHeaderStyle}>Custom Rules Editor</h4>
-                            <button style={buttonStyle} onClick={() => setIsRulesEditorOpen(false)}>Close</button>
+                ReactDOM.createPortal(<div
+                    style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", color: "#f2f3f5", zIndex: 9999, display: "grid", placeItems: "center", padding: "20px" }}
+                    // mousedown, not click: a text selection dragged out of the dialog must not close it.
+                    onMouseDown={e => { if (e.target === e.currentTarget) closeRulesEditor(); }}
+                >
+                    <div
+                        ref={rulesEditorDialogRef}
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="key-intercept-rules-editor-title"
+                        tabIndex={-1}
+                        onKeyDown={e => { if (e.key === "Escape") { e.preventDefault(); closeRulesEditor(); } }}
+                        style={{ width: "min(980px, 95vw)", height: "90vh", ...sectionStyle, padding: 0, background: "#1e1f22", display: "flex", flexDirection: "column", outline: "none", overflow: "hidden" }}
+                    >
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", padding: "10px", borderBottom: "1px solid #3f4147" }}>
+                            <h4 id="key-intercept-rules-editor-title" style={sectionHeaderStyle}>Custom Rules Editor</h4>
+                            <div style={{ display: "flex", gap: "8px" }}>
+                                <button style={buttonStyle} onClick={addRuleGroup}>Add rule group</button>
+                                <button style={buttonStyle} onClick={closeRulesEditor}>Close</button>
+                            </div>
                         </div>
 
-                        <button style={buttonStyle} onClick={addRuleGroup}>Add rule group</button>
-
+                        <div ref={rulesEditorScrollRef} style={{ overflow: "auto", overflowAnchor: "none", padding: "10px", display: "grid", gap: "10px", alignContent: "start" }}>
                         {editableConfig.rules_groups.length === 0 && (
                             <p style={{ margin: 0, color: "#b5bac1" }}>No rule groups yet. Add one to start.</p>
                         )}
 
-                        {[...editableConfig.rules_groups].sort((a, b) => a.order - b.order).map(group => {
+                        {[...editableConfig.rules_groups].sort((a, b) => a.order - b.order).map((group, groupPosition, sortedGroups) => {
                             const groupRules = editableConfig.rules
                                 .map((rule, index) => ({ rule, index }))
                                 .filter(item => item.rule.group_id === group.id)
                                 .sort((a, b) => a.rule.order - b.rule.order);
+                            const isGroupCollapsed = collapsedRuleGroups[group.id] ?? false;
+                            const isGroupAdvancedOpen = advancedRuleGroups[group.id] ?? false;
 
                             return (
-                                <div key={group.id} style={{ border: "1px solid #3f4147", borderRadius: "10px", padding: "10px", display: "grid", gap: "8px" }}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                                        <strong>
-                                            {group.id}:
-                                            <input
-                                                type="text"
-                                                style={inputStyle}
-                                                value={group.name}
-                                                onChange={(e) => {
-                                                    const newname = e.target.value;
-                                                    updateRuleGroup(group.id, current => ({ ...current, name: newname }));
+                                <div
+                                    key={group.id}
+                                    {...reorderDragProps("g", String(group.id), group.id, group.id, (sourceId, placeAfter) => animateReorder("g", () => reorderRuleGroup(sourceId, group.id, placeAfter)))}
+                                    style={{ background: GROUP_BG, border: "1px solid #3f4147", borderRadius: "10px", padding: "0 10px 10px", display: "grid", gap: "8px", ...reorderDragStyle(`g-${group.id}`) }}
+                                >
+                                    {/* Sticky within the scroll area, but only while this group is in view. */}
+                                    <div className={GROUP_HEADER_CLASS} style={{ position: "sticky", top: "-10px", zIndex: 1, background: GROUP_BG, fontSize: "15px", padding: "10px 0 6px", borderBottom: "1px solid", borderBottomColor: isGroupCollapsed ? "transparent" : "#3f4147", transition: "border-color 160ms", display: "grid", gap: "8px" }}>
+                                    {/* Three equal-weight cells so Enabled sits in the exact middle. */}
+                                    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto minmax(0, 1fr)", alignItems: "center", gap: "8px" }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: "4px", minWidth: 0 }}>
+                                            <button
+                                                type="button"
+                                                className={COLLAPSE_TOGGLE_CLASS}
+                                                aria-expanded={!isGroupCollapsed}
+                                                aria-label={isGroupCollapsed ? "Expand group" : "Collapse group"}
+                                                onClick={e => toggleRuleGroupCollapsed(group.id, e.currentTarget)}
+                                                // 32px square target, much easier to hit than the bare arrow; the arrow stays small inside it.
+                                                style={{ width: "32px", height: "32px", flex: "none", justifyContent: "center", fontSize: "0.75em", color: "#b5bac1" }}
+                                            >
+                                                <span style={{ transform: isGroupCollapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s ease" }}>▼</span>
+                                            </button>
+                                            {/* A label, so clicking the pencil also starts editing. */}
+                                            <label style={{ display: "flex", alignItems: "center", gap: "2px", minWidth: 0, cursor: "text" }}>
+                                                <input
+                                                    type="text"
+                                                    className={INLINE_INPUT_CLASS}
+                                                    // Sized to the text so the pencil sits right after the name.
+                                                    style={{ fontSize: "18px", width: `${Math.max((group.name || `Group ${group.id}`).length, 4) + 2}ch` }}
+                                                    aria-label="Group name"
+                                                    placeholder={`Group ${group.id}`}
+                                                    value={group.name}
+                                                    onChange={e => {
+                                                        const newname = e.currentTarget.value;
+                                                        updateRuleGroup(group.id, current => ({ ...current, name: newname }));
                                                     }}
-                                            />
-                                        </strong>
-                                        <button style={{ ...buttonStyle, background: "#da373c", borderColor: "#da373c" }} onClick={() => removeRuleGroup(group.id)}>Remove Group</button>
-                                    </div>
-                                    <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                                        <input
-                                            type="checkbox"
-                                            checked={group.enabled}
-                                            onChange={e => {
-                                                const nextEnabled = e.currentTarget.checked;
-                                                updateRuleGroup(group.id, current => ({ ...current, enabled: nextEnabled }));
-                                            }}
-                                        />
-                                        Enabled
-                                    </label>
-                                    <label>Group order<input style={inputStyle} type="number" min={0} value={group.order} onChange={e => {
-                                        const nextValue = parseNumericInput(e.currentTarget.value, group.order, { min: 0 });
-                                        updateRuleGroup(group.id, current => ({ ...current, order: nextValue }));
-                                    }} /></label>
-                                    <div style={{ display: "grid", gap: "8px" }}>
-                                        <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                                            <strong>Group timeout</strong>
-                                            <span style={{ color: "#b5bac1" }}>{formatTimeoutStatus(group.timeout_end, nowMs)}</span>
+                                                />
+                                                <span aria-hidden="true" style={{ color: "#b5bac1" }}>✎</span>
+                                            </label>
                                         </div>
-                                        <input style={inputStyle} value={group.timeout_end} onChange={e => setGroupTimeout(group.id, e.currentTarget.value)} />
-                                        <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                                        {renderEnabledToggle("Group", group.enabled, () => updateRuleGroup(group.id, current => ({ ...current, enabled: !current.enabled })))}
+                                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                                            {renderOrderControls("group", group.order, groupPosition === 0, groupPosition === sortedGroups.length - 1, direction => {
+                                                const target = sortedGroups[groupPosition + direction];
+                                                if (target) animateReorder("g", () => reorderRuleGroup(group.id, target.id, direction === 1));
+                                            })}
+                                            <button style={dangerButtonStyle} onClick={() => removeRuleGroup(group.id)}>Remove Group</button>
+                                        </div>
+                                    </div>
+                                    {/* Rule count | timeout (centered) | Add Rule */}
+                                    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto minmax(0, 1fr)", alignItems: "center", gap: "8px" }}>
+                                        <strong>{groupRules.length} {groupRules.length === 1 ? "Rule" : "Rules"}</strong>
+                                        <div role="group" aria-label="Group timeout" style={{ display: "flex", gap: "4px", alignItems: "center" }}>
+                                            <span style={{ color: "#b5bac1", whiteSpace: "nowrap", marginRight: "4px" }}>Timeout: {formatTimeoutStatus(group.timeout_end, nowMs)}</span>
                                             <input
-                                                style={{ ...inputStyle, width: "110px" }}
+                                                style={{ ...inputStyle, width: "60px", padding: "3px 6px" }}
                                                 type="number"
                                                 min={1}
+                                                aria-label="Amount to add"
                                                 value={groupTimeoutAdjustments[group.id] ?? "1"}
                                                 onChange={e => {
                                                     const nextAdjustment = e.currentTarget.value;
                                                     setGroupTimeoutAdjustments(prev => ({ ...prev, [group.id]: nextAdjustment }));
                                                 }}
                                             />
-                                            <button style={buttonStyle} onClick={() => addGroupTimeoutAmount(group.id, 1)}>Add Seconds</button>
-                                            <button style={buttonStyle} onClick={() => addGroupTimeoutAmount(group.id, 60)}>Add Minutes</button>
-                                            <button style={buttonStyle} onClick={() => addGroupTimeoutAmount(group.id, 3600)}>Add Hours</button>
-                                            <button style={buttonStyle} onClick={() => setGroupPermanentTimeout(group.id)}>Permanent</button>
+                                            <button style={smallButtonStyle} onClick={() => addGroupTimeoutAmount(group.id, 1)}>+Sec</button>
+                                            <button style={smallButtonStyle} onClick={() => addGroupTimeoutAmount(group.id, 60)}>+Min</button>
+                                            <button style={smallButtonStyle} onClick={() => addGroupTimeoutAmount(group.id, 3600)}>+Hour</button>
+                                            <button style={smallButtonStyle} onClick={() => setGroupPermanentTimeout(group.id)}>Permanent</button>
+                                            <button
+                                                type="button"
+                                                aria-expanded={isGroupAdvancedOpen}
+                                                onClick={() => setAdvancedRuleGroups(prev => ({ ...prev, [group.id]: !isGroupAdvancedOpen }))}
+                                                style={{ ...smallButtonStyle, background: "transparent", borderColor: "#4e5058", color: "#b5bac1" }}
+                                            >
+                                                Advanced {isGroupAdvancedOpen ? "▲" : "▼"}
+                                            </button>
                                         </div>
+                                        <button style={{ ...buttonStyle, justifySelf: "end" }} onClick={() => addRuleToGroup(group.id)}>Add Rule</button>
                                     </div>
-                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                                        <strong>Rules</strong>
-                                        <button style={buttonStyle} onClick={() => addRuleToGroup(group.id)}>Add Rule</button>
+                                    {isGroupAdvancedOpen && (
+                                        <label style={{ color: "#b5bac1" }}>Timeout end (ISO timestamp)
+                                            <input style={inputStyle} value={group.timeout_end} onChange={e => setGroupTimeout(group.id, e.currentTarget.value)} />
+                                        </label>
+                                    )}
+                                    {groupRules.length > 0 && (
+                                        <div className={RULES_COLLAPSE_CLASS} data-collapsed={isGroupCollapsed} aria-hidden="true">
+                                            <div>
+                                                <div style={{ ...ruleColumnsStyle, padding: "8px 9px 0", color: "#b5bac1", fontWeight: 600 }}>
+                                                    <span>Regex</span>
+                                                    <span />
+                                                    <span>Replacement</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
                                     </div>
+
+                                    <div className={RULES_COLLAPSE_CLASS} data-collapsed={isGroupCollapsed} aria-hidden={isGroupCollapsed}>
+                                    <div>
+                                    <div style={{ display: "grid", gap: "8px", paddingTop: "8px" }}>
                                     {groupRules.length === 0 && (
                                         <p style={{ margin: 0, color: "#b5bac1" }}>No rules in this group.</p>
                                     )}
-                                    {groupRules.map(({ rule, index }) => (
-                                        <div key={`${group.id}-${index}`} style={{ border: "1px solid #3f4147", borderRadius: "8px", padding: "8px", display: "grid", gap: "8px" }}>
-                                            <label>Regex rule<input style={inputStyle} value={rule.rule_regex} onChange={e => {
-                                                const nextRegex = e.currentTarget.value;
-                                                updateRuleAtIndex(index, current => ({ ...current, rule_regex: nextRegex }));
-                                            }} /></label>
-                                            <label>Replacement<input style={inputStyle} value={rule.rule_replacement} onChange={e => {
-                                                const nextReplacement = e.currentTarget.value;
-                                                updateRuleAtIndex(index, current => ({ ...current, rule_replacement: nextReplacement }));
-                                            }} /></label>
-                                            <label>Trigger chance ({Math.round(rule.chance_to_apply * 100)}%)<input style={inputStyle} type="range" min={0} max={100} step={1} value={Math.round(rule.chance_to_apply * 100)} onChange={e => {
-                                                const nextValue = parseNumericInput(e.currentTarget.value, 100, { min: 0, max: 100 });
-                                                updateRuleAtIndex(index, current => ({ ...current, chance_to_apply: nextValue / 100 }));
-                                            }} /></label>
-                                            <label>Rule order<input style={inputStyle} type="number" min={0} value={rule.order} onChange={e => {
-                                                const nextValue = parseNumericInput(e.currentTarget.value, rule.order, { min: 0 });
-                                                updateRuleAtIndex(index, current => ({ ...current, order: nextValue }));
-                                            }} /></label>
-                                            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+                                    {groupRules.map(({ rule, index }, rulePosition) => {
+                                        const ruleKey = ruleKeys[index];
+                                        const regexError = getRuleRegexError(rule.rule_regex);
+                                        const regexErrorId = `key-intercept-rule-${ruleKey}-regex-error`;
+                                        return (
+                                        <div
+                                            key={ruleKey}
+                                            {...reorderDragProps("r", String(ruleKey), group.id, index, (sourceIndex, placeAfter) => animateReorder("r", () => reorderRule(sourceIndex, index, placeAfter)))}
+                                            style={{ background: RULE_BG, border: "1px solid #3f4147", borderRadius: "8px", padding: "8px", display: "grid", gap: "6px", opacity: rule.enabled ? 1 : 0.6, ...reorderDragStyle(`r-${ruleKey}`) }}
+                                        >
+                                            <div style={{ ...ruleColumnsStyle, alignItems: "center" }}>
+                                                <input
+                                                    style={{ ...inputStyle, fontFamily: "monospace", ...(regexError ? { borderColor: "#da373c" } : {}) }}
+                                                    aria-label="Regex"
+                                                    value={rule.rule_regex}
+                                                    aria-invalid={regexError ? true : undefined}
+                                                    aria-describedby={regexError ? regexErrorId : undefined}
+                                                    onChange={e => {
+                                                        const nextRegex = e.currentTarget.value;
+                                                        updateRuleAtIndex(index, current => ({ ...current, rule_regex: nextRegex }));
+                                                    }}
+                                                />
+                                                <span aria-hidden="true" style={{ color: "#b5bac1" }}>→</span>
+                                                <input style={inputStyle} aria-label="Replacement" value={rule.rule_replacement} onChange={e => {
+                                                    const nextReplacement = e.currentTarget.value;
+                                                    updateRuleAtIndex(index, current => ({ ...current, rule_replacement: nextReplacement }));
+                                                }} />
+                                            </div>
+                                            {regexError && (
+                                                <span id={regexErrorId} role="alert" style={{ color: "#f23f43", fontSize: "12px" }}>Invalid regex, this rule is skipped: {regexError}</span>
+                                            )}
+                                            <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                                                {renderEnabledToggle("Rule", rule.enabled, () => updateRuleAtIndex(index, current => ({ ...current, enabled: !current.enabled })))}
                                                 <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                                                    <input type="checkbox" checked={rule.enabled} onChange={e => {
-                                                        const nextEnabled = e.currentTarget.checked;
-                                                        updateRuleAtIndex(index, current => ({ ...current, enabled: nextEnabled }));
+                                                    Chance {Math.round(rule.chance_to_apply * 100)}%
+                                                    <input style={{ width: "120px" }} type="range" min={0} max={100} step={1} value={Math.round(rule.chance_to_apply * 100)} onChange={e => {
+                                                        const nextValue = parseNumericInput(e.currentTarget.value, 100, { min: 0, max: 100 });
+                                                        updateRuleAtIndex(index, current => ({ ...current, chance_to_apply: nextValue / 100 }));
                                                     }} />
-                                                    Enabled
                                                 </label>
                                                 <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                                                     <input type="checkbox" checked={rule.regex_normalize} onChange={e => {
@@ -2459,13 +2807,22 @@ function ConfigPanel(props: any) {
                                                     }} />
                                                     Normalize regex
                                                 </label>
+                                                {renderOrderControls("rule", rule.order, rulePosition === 0, rulePosition === groupRules.length - 1, direction => {
+                                                    const target = groupRules[rulePosition + direction];
+                                                    if (target) animateReorder("r", () => reorderRule(index, target.index, direction === 1));
+                                                })}
+                                                <button style={dangerButtonStyle} onClick={() => removeRuleAtIndex(index)}>Remove Rule</button>
                                             </div>
-                                            <button style={{ ...buttonStyle, background: "#da373c", borderColor: "#da373c" }} onClick={() => removeRuleAtIndex(index)}>Remove Rule</button>
                                         </div>
-                                    ))}
+                                        );
+                                    })}
+                                    </div>
+                                    </div>
+                                    </div>
                                 </div>
                             );
                         })}
+                        </div>
                     </div>
                 </div>, document.body)
             )}
