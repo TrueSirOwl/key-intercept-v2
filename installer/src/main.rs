@@ -1497,6 +1497,21 @@ if (-not (Test-Path -LiteralPath $logPath)) {{
 if (-not (Test-Path -LiteralPath $errorLogPath)) {{
     New-Item -ItemType File -Path $errorLogPath -Force | Out-Null
 }}
+
+# A reinstall leaves the previous tray and loopback running (Windows only lets the
+# installer rename the running exe aside). The old loopback would keep port 35491,
+# so the new one could not start. Stop earlier trays, then any loopback, first.
+try {{
+    Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction Stop |
+        Where-Object {{ $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.Contains($PSCommandPath) }} |
+        ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
+}} catch {{}}
+$existingLoopbacks = @(Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($loopback)) -ErrorAction SilentlyContinue)
+if ($existingLoopbacks.Count -gt 0) {{
+    $existingLoopbacks | Stop-Process -Force -ErrorAction SilentlyContinue
+    $existingLoopbacks | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+}}
+
 $process = Start-Process -FilePath $loopback -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errorLogPath -PassThru
 
 $icon = New-Object System.Windows.Forms.NotifyIcon
@@ -2049,6 +2064,21 @@ mod tests {
         assert!(
             script.contains("Start-Process -FilePath $loopback -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errorLogPath -PassThru")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_tray_script_stops_previous_instances_before_starting() {
+        let script = build_windows_tray_script(
+            "123456",
+            Path::new("C:\\loopback-server.exe"),
+            Path::new("C:\\Users\\me\\AppData\\Roaming\\key-intercept\\config.json"),
+            None,
+        );
+        let stop_tray = script.find("$_.CommandLine.Contains($PSCommandPath)").unwrap();
+        let stop_loopback = script.find("$existingLoopbacks | Stop-Process").unwrap();
+        let start = script.find("$process = Start-Process").unwrap();
+        assert!(stop_tray < stop_loopback && stop_loopback < start);
     }
 
     #[cfg(windows)]

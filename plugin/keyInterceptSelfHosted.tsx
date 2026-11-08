@@ -310,11 +310,15 @@ function mergeLocalConfig(raw: unknown): LocalConfig {
     const sharedScopeList = createSharedScopeList(source.whitelist, source.blacklist);
     const mergedFilterMode: ScopeFilterMode = source.filter_mode === "blacklist" ? "blacklist" : "whitelist";
 
+    const mergedConfig = {
+        ...defaultLocalConfig.config,
+        ...((source.config as Record<string, unknown>) ?? {})
+    } as Config;
+    // The loopback rejects an empty replacement (400); fall back while the field is being cleared/retyped.
+    if (!mergedConfig.censored_replacement) mergedConfig.censored_replacement = defaultLocalConfig.config.censored_replacement;
+
     return {
-        config: {
-            ...defaultLocalConfig.config,
-            ...((source.config as Record<string, unknown>) ?? {})
-        } as Config,
+        config: mergedConfig,
         rules: mergedRules,
         rules_groups: mergedGroups,
         whitelist: sharedScopeList,
@@ -711,7 +715,11 @@ async function pushRemoteConfig(
         })
     });
 
-    if (!response.ok) throw new Error(`Relay update failed: ${response.status}`);
+    if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { error?: unknown } | null;
+        const detail = payload?.error ? ` (${String(payload.error)})` : "";
+        throw new Error(`Relay update failed: ${response.status}${detail}`);
+    }
 }
 
 function deriveRelayConfigReadStatus(status: number, payload: unknown): number {
@@ -2530,7 +2538,7 @@ function ConfigPanel(props: any) {
                             {renderTimeoutControls("bimbo_end", "Bimbo timeout")}
                             <label>Bimbo word length<input style={inputStyle} type="number" min={1} value={editableConfig.config.bimbo_word_length} onChange={e => {
                                 const nextValue = e.currentTarget.value;
-                                setEditableConfig(prev => ({ ...prev, config: { ...prev.config, bimbo_word_length: parseNumericInput(nextValue, prev.config.bimbo_word_length, { min: 1 }) } }));
+                                setEditableConfig(prev => ({ ...prev, config: { ...prev.config, bimbo_word_length: Math.floor(parseNumericInput(nextValue, prev.config.bimbo_word_length, { min: 1 })) } }));
                             }} /></label>
                         </div>
                     </CollapsibleSection>
