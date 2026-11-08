@@ -2802,8 +2802,12 @@ function ConfigPanel(props: any) {
                                             <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
                                                 {renderEnabledToggle("Rule", rule.enabled, () => updateRuleAtIndex(index, current => ({ ...current, enabled: !current.enabled })))}
                                                 <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                                                    Chance {Math.round(rule.chance_to_apply * 100)}%
-                                                    <input style={{ width: "120px" }} type="range" min={0} max={100} step={1} value={Math.round(rule.chance_to_apply * 100)} onChange={e => {
+                                                    Chance
+                                                    <input aria-label="Chance to apply (percent)" style={{ ...inputStyle, width: "64px", fontVariantNumeric: "tabular-nums" }} type="number" min={0} max={100} step={1} value={Math.round(rule.chance_to_apply * 100)} onChange={e => {
+                                                        const nextValue = Math.round(parseNumericInput(e.currentTarget.value, Math.round(rule.chance_to_apply * 100), { min: 0, max: 100 }));
+                                                        updateRuleAtIndex(index, current => ({ ...current, chance_to_apply: nextValue / 100 }));
+                                                    }} />%
+                                                    <input aria-label="Chance to apply" style={{ width: "120px" }} type="range" min={0} max={100} step={1} value={Math.round(rule.chance_to_apply * 100)} onChange={e => {
                                                         const nextValue = parseNumericInput(e.currentTarget.value, 100, { min: 0, max: 100 });
                                                         updateRuleAtIndex(index, current => ({ ...current, chance_to_apply: nextValue / 100 }));
                                                     }} />
