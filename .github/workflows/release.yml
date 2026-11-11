@@ -163,9 +163,11 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
 
+  # Runs after the release is published and attaches its file to it, so a slow
+  # macOS runner queue never holds back the desktop installer/loopback/plugin.
   build-mobile-artifacts:
     runs-on: ${{ matrix.os }}
-    needs: determine-version
+    needs: [determine-version, publish-release]
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -235,12 +237,12 @@ jobs:
             echo "Skipping APK signing."
           fi
 
-      - name: Upload Android APK
+      - name: Attach Android APK to release
         if: matrix.target == 'android'
-        uses: actions/upload-artifact@v4
-        with:
-          name: key-intercept-loopback-android
-          path: dist/${{ env.ANDROID_RELEASE_APK_NAME }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.determine-version.outputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" "dist/${ANDROID_RELEASE_APK_NAME}" --clobber --repo "$GITHUB_REPOSITORY"
 
       - name: Install XcodeGen
         if: matrix.target == 'ios'
@@ -265,16 +267,16 @@ jobs:
           mkdir -p ../../dist
           (cd build && zip -qry ../../../dist/${IOS_RELEASE_IPA_NAME} Payload)
 
-      - name: Upload iOS IPA
+      - name: Attach iOS IPA to release
         if: matrix.target == 'ios'
-        uses: actions/upload-artifact@v4
-        with:
-          name: key-intercept-loopback-ios
-          path: dist/${{ env.IOS_RELEASE_IPA_NAME }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.determine-version.outputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" "dist/${IOS_RELEASE_IPA_NAME}" --clobber --repo "$GITHUB_REPOSITORY"
 
   publish-release:
     runs-on: ubuntu-latest
-    needs: [determine-version, build-loopback-and-plugin, build-installer, build-mobile-artifacts]
+    needs: [determine-version, build-loopback-and-plugin, build-installer]
     steps:
       - name: Download installer packages
         uses: actions/download-artifact@v4
@@ -296,18 +298,6 @@ jobs:
           pattern: key-intercept-vencord-plugin
           merge-multiple: true
           path: release-assets
-
-      - name: Download mobile artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: key-intercept-loopback-*
-          merge-multiple: true
-          path: release-assets
-
-      - name: Verify mobile release asset names
-        run: |
-          test -f "release-assets/${ANDROID_RELEASE_APK_NAME}"
-          test -f "release-assets/${IOS_RELEASE_IPA_NAME}"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
