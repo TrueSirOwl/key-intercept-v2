@@ -486,13 +486,69 @@ fn install_loopback_binary_from_path(source: &Path) -> Result<()> {
         .with_context(|| format!("failed to create {}", target_dir.display()))?;
 
     let target = loopback_binary_target_path()?;
+    // Windows can't replace a running .exe, and a loopback left running would
+    // keep port 35491 so the new one could not start. Have the user turn the
+    // previous one off first (systemd's `restart` handles this on Linux).
+    #[cfg(windows)]
+    wait_for_previous_windows_loopback_exit(&target_dir)?;
     replace_executable(source, &target)
+}
+
+/// While a tray or loopback from a previous install is running (including a
+/// loopback still running from a renamed-aside `.old` exe left by older
+/// installers), shows a popup asking the user to turn it off. Retry re-checks;
+/// Cancel aborts the install.
+#[cfg(windows)]
+fn wait_for_previous_windows_loopback_exit(install_dir: &Path) -> Result<()> {
+    let status = Command::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(build_windows_wait_previous_script(install_dir))
+        .status()
+        .context("failed to run powershell to check for a running loopback")?;
+    if !status.success() {
+        bail!(
+            "installation cancelled: a previous Key Intercept loopback is still running. Turn it off (tray icon > Exit) and rerun the installer."
+        );
+    }
+    for leftover in ["key-intercept-loopback.exe.old", "key-intercept-loopback.exe.new"] {
+        let _ = fs::remove_file(install_dir.join(leftover));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn build_windows_wait_previous_script(install_dir: &Path) -> String {
+    let dir = to_powershell_single_quoted_literal(&install_dir.to_string_lossy());
+    format!(
+        r#"$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$dir = '{dir}'
+function Get-Previous {{
+    @(Get-CimInstance Win32_Process | Where-Object {{
+        $_.ProcessId -ne $PID -and (
+            $_.Name -like 'key-intercept-loopback*' -or
+            ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase)) -or
+            ($_.Name -eq 'powershell.exe' -and $_.CommandLine -and $_.CommandLine.Contains('key-intercept-loopback-tray.ps1'))
+        )
+    }})
+}}
+while (($running = Get-Previous).Count -gt 0) {{
+    $list = ($running | ForEach-Object {{ "  $($_.Name) (PID $($_.ProcessId))" }}) -join "`n"
+    $message = "Key Intercept is still running from a previous install:`n`n$list`n`nTurn it off before installing: right-click the Key Intercept tray icon and choose Exit, or end these processes in Task Manager. Then click Retry."
+    $choice = [System.Windows.Forms.MessageBox]::Show($message, 'Key Intercept Installer', [System.Windows.Forms.MessageBoxButtons]::RetryCancel, [System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($choice -ne [System.Windows.Forms.DialogResult]::Retry) {{ exit 1 }}
+}}
+"#
+    )
 }
 
 /// Replaces `target` with a copy of `source`, even while `target` is running.
 /// Writing into a running executable fails (`Text file busy` on Linux), so copy
-/// to a sibling temp file and rename it over the target instead. Windows can't
-/// rename onto a running .exe, but can rename the running one aside first.
+/// to a sibling temp file and rename it over the target instead. On Windows the
+/// previous loopback has already been stopped, so the rename can replace it.
 fn replace_executable(source: &Path, target: &Path) -> Result<()> {
     let file_name = target
         .file_name()
@@ -508,20 +564,6 @@ fn replace_executable(source: &Path, target: &Path) -> Result<()> {
         )
     })?;
     ensure_loopback_binary_executable(&staged)?;
-
-    #[cfg(windows)]
-    if target.exists() {
-        let previous = target.with_file_name(format!("{file_name}.old"));
-        // A leftover .old may still be running from an earlier install; ignore.
-        let _ = fs::remove_file(&previous);
-        fs::rename(target, &previous).with_context(|| {
-            format!(
-                "failed to move existing {} aside to {}",
-                target.display(),
-                previous.display()
-            )
-        })?;
-    }
 
     fs::rename(&staged, target).with_context(|| {
         format!(
@@ -1499,20 +1541,6 @@ if (-not (Test-Path -LiteralPath $errorLogPath)) {{
     New-Item -ItemType File -Path $errorLogPath -Force | Out-Null
 }}
 
-# A reinstall leaves the previous tray and loopback running (Windows only lets the
-# installer rename the running exe aside). The old loopback would keep port 35491,
-# so the new one could not start. Stop earlier trays, then any loopback, first.
-try {{
-    Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction Stop |
-        Where-Object {{ $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.Contains($PSCommandPath) }} |
-        ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
-}} catch {{}}
-$existingLoopbacks = @(Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($loopback)) -ErrorAction SilentlyContinue)
-if ($existingLoopbacks.Count -gt 0) {{
-    $existingLoopbacks | Stop-Process -Force -ErrorAction SilentlyContinue
-    $existingLoopbacks | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
-}}
-
 $process = Start-Process -FilePath $loopback -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errorLogPath -PassThru
 
 $icon = New-Object System.Windows.Forms.NotifyIcon
@@ -2069,17 +2097,18 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_tray_script_stops_previous_instances_before_starting() {
-        let script = build_windows_tray_script(
-            "123456",
-            Path::new("C:\\loopback-server.exe"),
-            Path::new("C:\\Users\\me\\AppData\\Roaming\\key-intercept\\config.json"),
-            None,
-        );
-        let stop_tray = script.find("$_.CommandLine.Contains($PSCommandPath)").unwrap();
-        let stop_loopback = script.find("$existingLoopbacks | Stop-Process").unwrap();
-        let start = script.find("$process = Start-Process").unwrap();
-        assert!(stop_tray < stop_loopback && stop_loopback < start);
+    fn windows_wait_previous_script_asks_user_until_loopback_is_off() {
+        let script = build_windows_wait_previous_script(Path::new(
+            "C:\\Users\\o'neil\\AppData\\Local\\Programs\\key-intercept",
+        ));
+        assert!(script.contains("$dir = 'C:\\Users\\o''neil\\AppData\\Local\\Programs\\key-intercept'"));
+        assert!(script.contains("$_.Name -like 'key-intercept-loopback*'"));
+        assert!(script.contains("Contains('key-intercept-loopback-tray.ps1')"));
+        assert!(script.contains("$_.ProcessId -ne $PID"));
+        assert!(script.contains("while (($running = Get-Previous).Count -gt 0)"));
+        assert!(script.contains("MessageBoxButtons]::RetryCancel"));
+        assert!(script.contains("exit 1"));
+        assert!(!script.contains("Stop-Process"));
     }
 
     #[cfg(windows)]
