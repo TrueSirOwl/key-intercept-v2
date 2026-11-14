@@ -1738,15 +1738,30 @@ const COLLAPSE_TOGGLE_CSS = `
 .${COLLAPSE_TOGGLE_CLASS}:focus-visible { outline: 2px solid #5865f2; outline-offset: 2px; }
 `;
 
+// Profile user id the panel is showing; open/closed state is remembered separately per user.
+const CollapseScope = React.createContext("");
+
 // Open/closed state lives in a hidden plugin setting so it survives panel remounts
-// and restarts (Discord desktop has no localStorage).
-function usePersistedCollapsed(key: string) {
-    const [collapsed, setCollapsed] = React.useState(() => settings.store.collapsedSections?.[key] ?? false);
-    const toggle = React.useCallback(() => setCollapsed(prev => {
-        const next = !prev;
-        settings.store.collapsedSections = { ...settings.store.collapsedSections, [key]: next };
-        return next;
-    }), [key]);
+// and restarts (Discord desktop has no localStorage). Keys are "<userId>/<key>"; a user
+// with no saved state yet inherits the old unscoped value, then false.
+function readCollapsed(key: string, scope: string): boolean {
+    const stored = settings.store.collapsedSections ?? {};
+    return stored[`${scope}/${key}`] ?? stored[key] ?? false;
+}
+
+function usePersistedCollapsed(key: string, scopeOverride?: string) {
+    const contextScope = React.useContext(CollapseScope);
+    const scope = scopeOverride ?? contextScope;
+    // Read from the setting on every render so switching profiles shows that user's state.
+    const [, rerender] = React.useReducer((n: number) => n + 1, 0);
+    const collapsed = readCollapsed(key, scope);
+    const toggle = React.useCallback(() => {
+        settings.store.collapsedSections = {
+            ...settings.store.collapsedSections,
+            [`${scope}/${key}`]: !readCollapsed(key, scope)
+        };
+        rerender();
+    }, [key, scope]);
     return [collapsed, toggle] as const;
 }
 
@@ -1808,7 +1823,7 @@ function ConfigPanel(props: any) {
     const nextRuleKeyRef = React.useRef(0);
     const [nowMs, setNowMs] = React.useState(() => Date.now());
     const [canViewRemote, setCanViewRemote] = React.useState(isOwnProfile);
-    const [isPanelCollapsed, togglePanelCollapsed] = usePersistedCollapsed(PANEL_COLLAPSED_KEY);
+    const [isPanelCollapsed, togglePanelCollapsed] = usePersistedCollapsed(PANEL_COLLAPSED_KEY, profileUserId);
     const skipAutosaveRef = React.useRef(true);
     const lastSavedSnapshotRef = React.useRef("");
     const saveQueueRef = React.useRef(Promise.resolve());
@@ -2413,7 +2428,7 @@ function ConfigPanel(props: any) {
             </CollapseToggle>
 
             {!isPanelCollapsed && (
-            <>
+            <CollapseScope.Provider value={profileUserId}>
             <div style={sectionStyle}>
                 <h3 style={{ margin: 0, fontSize: "16px" }}>Control Center</h3>
                 <p style={{ margin: "4px 0 0 0", color: "#b5bac1" }}>
@@ -2970,7 +2985,7 @@ function ConfigPanel(props: any) {
                 </>
             )}
 
-            </>
+            </CollapseScope.Provider>
             )}
 
             {(!isPanelCollapsed || status) && <p style={{ margin: 0, color: "#b5bac1" }}>{status}</p>}
