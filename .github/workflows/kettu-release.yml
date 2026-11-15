@@ -79,6 +79,8 @@ jobs:
           path: pages-dist
 
   deploy-kettu-pages:
+    # Only the default branch publishes the Kettu source; other pushes and PRs just build.
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
     needs: build-kettu-pages
     environment:
