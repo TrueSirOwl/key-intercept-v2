@@ -10,6 +10,7 @@ const LOG_PREFIX = "[key-intercept]";
 const MOBILE_STATE_KEY = "key-intercept/mobile-loopback-state/v1";
 const PANEL_COLLAPSED_KEY = "panel";
 const SECTION_COLLAPSED_KEY_PREFIX = "section/";
+const RULE_GROUP_COLLAPSED_KEY_PREFIX = "ruleGroup/";
 const DEVELOPER_MODE_ENABLED = (() => {
     const values: unknown[] = [];
     try {
@@ -1749,20 +1750,26 @@ function readCollapsed(key: string, scope: string): boolean {
     return stored[`${scope}/${key}`] ?? stored[key] ?? false;
 }
 
-function usePersistedCollapsed(key: string, scopeOverride?: string) {
-    const contextScope = React.useContext(CollapseScope);
-    const scope = scopeOverride ?? contextScope;
+// For a variable set of keys in one scope, e.g. one per rule group.
+function usePersistedCollapsedKeys(scope: string) {
     // Read from the setting on every render so switching profiles shows that user's state.
     const [, rerender] = React.useReducer((n: number) => n + 1, 0);
-    const collapsed = readCollapsed(key, scope);
-    const toggle = React.useCallback(() => {
+    const isCollapsed = (key: string) => readCollapsed(key, scope);
+    const toggle = React.useCallback((key: string) => {
         settings.store.collapsedSections = {
             ...settings.store.collapsedSections,
             [`${scope}/${key}`]: !readCollapsed(key, scope)
         };
         rerender();
-    }, [key, scope]);
-    return [collapsed, toggle] as const;
+    }, [scope]);
+    return [isCollapsed, toggle] as const;
+}
+
+function usePersistedCollapsed(key: string, scopeOverride?: string) {
+    const contextScope = React.useContext(CollapseScope);
+    const [isCollapsed, toggleKey] = usePersistedCollapsedKeys(scopeOverride ?? contextScope);
+    const toggle = React.useCallback(() => toggleKey(key), [toggleKey, key]);
+    return [isCollapsed(key), toggle] as const;
 }
 
 function CollapseToggle({ collapsed, onToggle, children }: { collapsed: boolean; onToggle: () => void; children: React.ReactNode; }) {
@@ -1808,7 +1815,6 @@ function ConfigPanel(props: any) {
     );
     const [groupTimeoutAdjustments, setGroupTimeoutAdjustments] = React.useState<Record<number, string>>({});
     const [isRulesEditorOpen, setIsRulesEditorOpen] = React.useState(false);
-    const [collapsedRuleGroups, setCollapsedRuleGroups] = React.useState<Record<number, boolean>>({});
     const [advancedRuleGroups, setAdvancedRuleGroups] = React.useState<Record<number, boolean>>({});
     const rulesEditorScrollRef = React.useRef<HTMLDivElement>(null);
     const flipSnapshotRef = React.useRef<Map<string, number> | null>(null);
@@ -1824,6 +1830,7 @@ function ConfigPanel(props: any) {
     const [nowMs, setNowMs] = React.useState(() => Date.now());
     const [canViewRemote, setCanViewRemote] = React.useState(isOwnProfile);
     const [isPanelCollapsed, togglePanelCollapsed] = usePersistedCollapsed(PANEL_COLLAPSED_KEY, profileUserId);
+    const [isRuleGroupKeyCollapsed, toggleRuleGroupKey] = usePersistedCollapsedKeys(profileUserId);
     const skipAutosaveRef = React.useRef(true);
     const lastSavedSnapshotRef = React.useRef("");
     const saveQueueRef = React.useRef(Promise.resolve());
@@ -2347,7 +2354,7 @@ function ConfigPanel(props: any) {
     // whole animation (a pinned header would otherwise be carried off-screen when its group shrinks),
     // so the cursor stays over the toggle.
     const toggleRuleGroupCollapsed = (groupId: number, trigger: HTMLElement) => {
-        setCollapsedRuleGroups(prev => ({ ...prev, [groupId]: !prev[groupId] }));
+        toggleRuleGroupKey(`${RULE_GROUP_COLLAPSED_KEY_PREFIX}${groupId}`);
         const header = trigger.closest(`.${GROUP_HEADER_CLASS}`);
         const scroller = rulesEditorScrollRef.current;
         if (!header || !scroller) return;
@@ -2676,7 +2683,7 @@ function ConfigPanel(props: any) {
                                 .map((rule, index) => ({ rule, index }))
                                 .filter(item => item.rule.group_id === group.id)
                                 .sort((a, b) => a.rule.order - b.rule.order);
-                            const isGroupCollapsed = collapsedRuleGroups[group.id] ?? false;
+                            const isGroupCollapsed = isRuleGroupKeyCollapsed(`${RULE_GROUP_COLLAPSED_KEY_PREFIX}${group.id}`);
                             const isGroupAdvancedOpen = advancedRuleGroups[group.id] ?? false;
 
                             return (
