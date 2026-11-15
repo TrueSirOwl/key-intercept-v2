@@ -2,7 +2,7 @@ import { definePluginSettings } from "@api/Settings";
 import { findGroupChildrenByChildId } from "@api/ContextMenu";
 import definePlugin, { OptionType } from "@utils/types";
 import { findByPropsLazy } from "@webpack";
-import { Menu, React, ReactDOM, UserStore } from "@webpack/common";
+import { Menu, React, UserStore } from "@webpack/common";
 
 const LOOPBACK = "http://127.0.0.1:35491";
 const DISCORD_SECURE_ORIGINS = new Set(["https://discord.com", "https://ptb.discord.com", "https://canary.discord.com"]);
@@ -1725,7 +1725,9 @@ const INLINE_INPUT_CLASS = "key-intercept-inline-input";
 const RULES_COLLAPSE_CLASS = "key-intercept-rules-collapse";
 // Rule group header: buttons and inputs take the header's text size instead of the browser's small default.
 const GROUP_HEADER_CLASS = "key-intercept-group-header";
+const RULES_EDITOR_CLASS = "key-intercept-rules-editor";
 const COLLAPSE_TOGGLE_CSS = `
+.${RULES_EDITOR_CLASS}::backdrop { background: transparent; }
 .${RULES_COLLAPSE_CLASS} { display: grid; grid-template-rows: 1fr; margin-top: -8px; transition: grid-template-rows 160ms ease-out, visibility 160ms; }
 .${RULES_COLLAPSE_CLASS}[data-collapsed="true"] { grid-template-rows: 0fr; visibility: hidden; }
 .${RULES_COLLAPSE_CLASS} > div { overflow: hidden; min-height: 0; }
@@ -2251,7 +2253,7 @@ function ConfigPanel(props: any) {
         </div>
     );
 
-    // Focus the dialog so Escape reaches its onKeyDown without the user clicking into it first.
+    // Start focus on the dialog itself, not on its first button as showModal() would.
     React.useEffect(() => {
         if (isRulesEditorOpen) rulesEditorDialogRef.current?.focus();
     }, [isRulesEditorOpen]);
@@ -2277,6 +2279,12 @@ function ConfigPanel(props: any) {
 
     const dangerButtonStyle: React.CSSProperties = { ...buttonStyle, background: "#da373c", borderColor: "#da373c" };
     const closeRulesEditor = () => setIsRulesEditorOpen(false);
+    // The editor is a modal <dialog> rendered inside the panel, not portaled to <body>: the browser's
+    // top layer shows it above everything, and its DOM stays inside the profile popout, whose
+    // outside-click check would otherwise close the popout (and the editor with it) on every click.
+    const showRulesEditorModal = React.useCallback((dialog: HTMLDialogElement | null) => {
+        if (dialog && !dialog.open) dialog.showModal();
+    }, []);
 
     // Records where the cards of one kind are, then applies the reorder; the layout effect animates the difference.
     // Only one kind is recorded so rules don't double-move when their whole group slides.
@@ -2656,10 +2664,14 @@ function ConfigPanel(props: any) {
             )}
 
             {((isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote)) && isRulesEditorOpen && (
-                ReactDOM.createPortal(<div
-                    style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", color: "#f2f3f5", zIndex: 9999, display: "grid", placeItems: "center", padding: "20px" }}
+                <dialog
+                    ref={showRulesEditorModal}
+                    className={RULES_EDITOR_CLASS}
+                    style={{ position: "fixed", inset: 0, width: "100vw", height: "100vh", maxWidth: "none", maxHeight: "none", margin: 0, border: "none", boxSizing: "border-box", background: "rgba(0,0,0,0.7)", color: "#f2f3f5", display: "grid", placeItems: "center", padding: "20px" }}
                     // mousedown, not click: a text selection dragged out of the dialog must not close it.
                     onMouseDown={e => { if (e.target === e.currentTarget) closeRulesEditor(); }}
+                    // Escape: keep React in charge of closing instead of the browser hiding the dialog.
+                    onCancel={e => { e.preventDefault(); closeRulesEditor(); }}
                 >
                     <div
                         ref={rulesEditorDialogRef}
@@ -2667,7 +2679,6 @@ function ConfigPanel(props: any) {
                         aria-modal="true"
                         aria-labelledby="key-intercept-rules-editor-title"
                         tabIndex={-1}
-                        onKeyDown={e => { if (e.key === "Escape") { e.preventDefault(); closeRulesEditor(); } }}
                         style={{ width: "min(980px, 95vw)", height: "90vh", ...sectionStyle, padding: 0, background: "#1e1f22", display: "flex", flexDirection: "column", outline: "none", overflow: "hidden" }}
                     >
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", padding: "10px", borderBottom: "1px solid #3f4147" }}>
@@ -2863,7 +2874,7 @@ function ConfigPanel(props: any) {
                         })}
                         </div>
                     </div>
-                </div>, document.body)
+                </dialog>
             )}
 
             {isOwnProfile && (
