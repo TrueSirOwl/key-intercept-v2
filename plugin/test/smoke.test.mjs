@@ -30,4 +30,10 @@ for (const snippet of requiredSnippets) {
     assert.ok(source.includes(snippet), `Missing expected plugin behavior snippet: ${snippet}`);
 }
 
+// @webpack/common exports stay undefined until Discord's webpack has loaded; touching one while
+// the module loads throws and stops all of Vencord from starting.
+const lazyWebpackCommon = "React|ReactDOM|Menu|UserStore";
+const eagerUse = source.match(new RegExp(`^(?:export\\s+)?(?:const|let|var)\\s+[^=\\n]*=\\s*(?:${lazyWebpackCommon})\\.[^\\n]*`, "m"));
+assert.equal(eagerUse, null, `Module-level use of a lazy @webpack/common export: ${eagerUse?.[0]}`);
+
 console.log("plugin smoke test passed");

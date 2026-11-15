@@ -1740,7 +1740,11 @@ const COLLAPSE_TOGGLE_CSS = `
 `;
 
 // Profile user id the panel is showing; open/closed state is remembered separately per user.
-const CollapseScope = React.createContext("");
+// Created on first render: Vencord's React only exists once Discord's webpack has loaded, so
+// calling it at module load throws and takes all of Vencord down with it.
+const createCollapseScope = () => React.createContext("");
+let collapseScope: ReturnType<typeof createCollapseScope> | undefined;
+const getCollapseScope = () => collapseScope ??= createCollapseScope();
 
 // Open/closed state lives in a hidden plugin setting so it survives panel remounts
 // and restarts (Discord desktop has no localStorage). Keys are "<userId>/<key>"; a user
@@ -1766,7 +1770,7 @@ function usePersistedCollapsedKeys(scope: string) {
 }
 
 function usePersistedCollapsed(key: string, scopeOverride?: string) {
-    const contextScope = React.useContext(CollapseScope);
+    const contextScope = React.useContext(getCollapseScope());
     const [isCollapsed, toggleKey] = usePersistedCollapsedKeys(scopeOverride ?? contextScope);
     const toggle = React.useCallback(() => toggleKey(key), [toggleKey, key]);
     return [isCollapsed(key), toggle] as const;
@@ -1798,6 +1802,7 @@ function CollapsibleSection({ id, title, children }: { id: string; title: string
 function ConfigPanel(props: any) {
     const activeUserId = resolveSessionUserId(props);
     const profileUserId = getProfileUserId(props) ?? activeUserId;
+    const CollapseScope = getCollapseScope();
     const hasValidProfileTarget = isDiscordId(profileUserId);
     const isOwnProfile = !hasValidProfileTarget || profileUserId === activeUserId;
     const panelOpenInfo = getProfilePanelOpenInfo(props);
