@@ -333,6 +333,7 @@ function mergeLocalConfig(raw) {
             const fallbackTimeout = typeof group.disabled_at === "string" ? group.disabled_at : farFuture;
             return {
                 id: parseNumericInput(String(group.id ?? index + 1), index + 1, { min: 1 }),
+                name: typeof group.name === "string" ? group.name : `Group ${index + 1}`,
                 timeout_end: typeof group.timeout_end === "string" ? group.timeout_end : fallbackTimeout,
                 enabled: group.enabled === undefined
                     ? (typeof group.disabled_at === "string" ? Date.parse(group.disabled_at) > Date.now() : true)
@@ -2332,7 +2333,7 @@ function ConfigPanel(props) {
                 ...prev,
                 rules_groups: [
                     ...prev.rules_groups,
-                    { id: nextGroupId, timeout_end: farFuture, enabled: true, order: nextOrder }
+                    { id: nextGroupId, name: `Group ${nextGroupId}`, timeout_end: farFuture, enabled: true, order: nextOrder }
                 ]
             };
         });
@@ -2521,7 +2522,7 @@ function ConfigPanel(props) {
                         padding: 10
                     }
                 },
-                h(Text, { style: { color: "#f2f3f5", fontWeight: "700" } }, `Group #${group.id}`),
+                h(Text, { style: { color: "#f2f3f5", fontWeight: "700" } }, group.name || `Group ${group.id}`),
                 h(View, { style: { marginTop: 6, flexDirection: "row", flexWrap: "wrap" } },
                     button(group.enabled ? "Enabled" : "Disabled", () => {
                         setEditableConfig(prev => ({
