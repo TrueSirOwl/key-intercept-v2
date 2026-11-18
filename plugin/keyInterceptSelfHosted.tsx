@@ -49,6 +49,7 @@ type Config = {
 };
 
 type Rule = {
+    id: number;
     rule_regex: string;
     rule_replacement: string;
     regex_normalize: boolean;
@@ -56,6 +57,15 @@ type Rule = {
     chance_to_apply: number;
     order: number;
     group_id: number;
+    actions: RuleAction[];
+};
+
+// A config change a rule makes each time it matches, e.g. { target: "gag.timer", op: "add", value: "5m" }.
+// listRuleActionFields defines the targets and ruleActionOps the ops for each kind of target.
+type RuleAction = {
+    target: string;
+    op: string;
+    value: number | string | null;
 };
 
 type RuleGroup = {
@@ -262,6 +272,31 @@ const ChannelStore = findByPropsLazy("getChannel", "getDMFromUserId");
 const GuildStore = findByPropsLazy("getGuild", "getGuilds");
 const SelectedChannelStore = findByPropsLazy("getChannelId");
 
+// Valid, unique ids are kept; the rest (configs from before rules had ids, duplicates) get the next
+// free ids in list order, so every client derives the same ids from the same config.
+function assignRuleIds(rawIds: unknown[]): number[] {
+    const used = new Set<number>();
+    const kept = rawIds.map(raw => {
+        const id = Number(raw);
+        if (!Number.isInteger(id) || id < 1 || used.has(id)) return 0;
+        used.add(id);
+        return id;
+    });
+    let nextId = Math.max(0, ...used) + 1;
+    return kept.map(id => id || nextId++);
+}
+
+function mergeRuleActions(raw: unknown): RuleAction[] {
+    if (!Array.isArray(raw)) return [];
+    return (raw as Array<Record<string, unknown>>)
+        .filter(action => action && typeof action.target === "string" && typeof action.op === "string")
+        .map(action => ({
+            target: action.target as string,
+            op: action.op as string,
+            value: typeof action.value === "number" || typeof action.value === "string" ? action.value : null
+        }));
+}
+
 function mergeLocalConfig(raw: unknown): LocalConfig {
     if (!raw || typeof raw !== "object") return cloneDefaultConfig();
 
@@ -282,17 +317,19 @@ function mergeLocalConfig(raw: unknown): LocalConfig {
         )
     ) ? nestedConfig as Record<string, unknown> : asRecord;
 
-    const mergedRules = Array.isArray(source.rules)
-        ? (source.rules as Array<Record<string, unknown>>).map((rule, index) => ({
-            rule_regex: typeof rule.rule_regex === "string" ? rule.rule_regex : "",
-            rule_replacement: typeof rule.rule_replacement === "string" ? rule.rule_replacement : "",
-            regex_normalize: Boolean(rule.regex_normalize),
-            enabled: rule.enabled === undefined ? true : Boolean(rule.enabled),
-            chance_to_apply: parseNumericInput(String(rule.chance_to_apply ?? "1"), 1, { min: 0, max: 1 }),
-            order: parseNumericInput(String(rule.order ?? index), index, { min: 0 }),
-            group_id: parseNumericInput(String(rule.group_id ?? 1), 1, { min: 1 })
-        }))
-        : [];
+    const sourceRules = Array.isArray(source.rules) ? source.rules as Array<Record<string, unknown>> : [];
+    const ruleIds = assignRuleIds(sourceRules.map(rule => rule.id));
+    const mergedRules = sourceRules.map((rule, index) => ({
+        id: ruleIds[index],
+        rule_regex: typeof rule.rule_regex === "string" ? rule.rule_regex : "",
+        rule_replacement: typeof rule.rule_replacement === "string" ? rule.rule_replacement : "",
+        regex_normalize: Boolean(rule.regex_normalize),
+        enabled: rule.enabled === undefined ? true : Boolean(rule.enabled),
+        chance_to_apply: parseNumericInput(String(rule.chance_to_apply ?? "1"), 1, { min: 0, max: 1 }),
+        order: parseNumericInput(String(rule.order ?? index), index, { min: 0 }),
+        group_id: parseNumericInput(String(rule.group_id ?? 1), 1, { min: 1 }),
+        actions: mergeRuleActions(rule.actions)
+    }));
     const mergedGroups = Array.isArray(source.rules_groups)
         ? (source.rules_groups as Array<Record<string, unknown>>).map((group, index) => {
             const fallbackTimeout = typeof group.disabled_at === "string" ? group.disabled_at : farFuture;
@@ -1034,6 +1071,262 @@ function formatTimeoutStatus(endIso: string, nowMs: number): string {
     return formatCountdown(endMs - nowMs);
 }
 
+// Ends a running timer earlier (into the past ends it). One that isn't running is left alone:
+// there is no time to take from an off timer, and none to count down from a permanent one.
+function shortenTimeout(endIso: string, nowMs: number, seconds: number): string {
+    const endMs = Date.parse(endIso);
+    const isRunning = Number.isFinite(endMs) && endMs > nowMs && endMs < permanentTimestamp - 1000;
+    return isRunning ? new Date(endMs - seconds * 1000).toISOString() : endIso;
+}
+
+const durationUnitSeconds: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400 };
+
+// "30s", "5m", "1h 30m", "2d" -> seconds; null for anything else, including a number without a unit.
+function parseDuration(text: string): number | null {
+    const normalized = String(text ?? "").trim().toLowerCase();
+    if (!/^(\d+(\.\d+)?\s*[smhd]\s*)+$/.test(normalized)) return null;
+    let seconds = 0;
+    for (const [, amount, unit] of normalized.matchAll(/(\d+(?:\.\d+)?)\s*([smhd])/g)) {
+        seconds += Number(amount) * durationUnitSeconds[unit];
+    }
+    return seconds;
+}
+
+// timer: an ISO end timestamp. percent: 0..1, entered as 0..100. words: a list of strings.
+type RuleActionKind = "timer" | "switch" | "percent" | "number" | "text" | "words" | "pet_type";
+
+type RuleActionField = {
+    target: string;
+    // What the target belongs to ("pet", "group.3", "rule.7"); the editor picks this first, then field and op.
+    entity: string;
+    entityLabel: string;
+    label: string;
+    kind: RuleActionKind;
+    min?: number;
+    max?: number;
+    get: (config: LocalConfig) => any;
+    set: (config: LocalConfig, value: any) => LocalConfig;
+};
+
+const ruleActionAdjustOps = [
+    { op: "increase", label: "Increase {field} by" },
+    { op: "decrease", label: "Decrease {field} by" },
+    { op: "set", label: "Set {field} to" }
+];
+const ruleActionOps: Record<RuleActionKind, Array<{ op: string; label: string; }>> = {
+    timer: [
+        { op: "add", label: "Add time" },
+        { op: "remove", label: "Remove time" },
+        { op: "permanent", label: "Make permanent" },
+        { op: "off", label: "Turn off" }
+    ],
+    switch: [{ op: "enable", label: "Enable" }, { op: "disable", label: "Disable" }],
+    percent: ruleActionAdjustOps,
+    number: ruleActionAdjustOps,
+    text: [{ op: "set", label: "Set {field} to" }],
+    words: [{ op: "add", label: "Add {field}" }, { op: "remove", label: "Remove {field}" }],
+    pet_type: [{ op: "set", label: "Set {field} to" }]
+};
+
+function ruleActionTakesValue(kind: RuleActionKind, op: string): boolean {
+    return kind === "timer" ? op === "add" || op === "remove" : kind !== "switch";
+}
+
+function truncateLabel(text: string, max: number): string {
+    return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+// Everything a rule action can change. Sub Control and the scope filter are left out on purpose:
+// a rule must not be able to lift the lock someone else put on this config, and the scope filter
+// is a setting of this device's owner only.
+function listRuleActionFields(config: LocalConfig): RuleActionField[] {
+    const fields: RuleActionField[] = [];
+    const add = (entity: string, entityLabel: string, key: string, label: string, kind: RuleActionKind, get: RuleActionField["get"], set: RuleActionField["set"], limits?: { min?: number; max?: number; }) => {
+        fields.push({ target: `${entity}.${key}`, entity, entityLabel, label, kind, get, set, ...limits });
+    };
+    const configField = (key: keyof Config) => [
+        (c: LocalConfig) => c.config[key],
+        (c: LocalConfig, value: unknown) => ({ ...c, config: { ...c.config, [key]: value } })
+    ] as const;
+    const droneField = (key: keyof DroneConfig) => [
+        (c: LocalConfig) => c.drone_config[key],
+        (c: LocalConfig, value: unknown) => ({ ...c, drone_config: { ...c.drone_config, [key]: value } })
+    ] as const;
+
+    for (const { key, label } of modeTimeoutFields) {
+        const mode = key.slice(0, -"_end".length);
+        add(mode, label.replace(/ timeout$/, ""), "timer", "time", "timer", ...configField(key));
+    }
+    add("pet", "Pet", "amount", "pet amount", "percent", ...configField("pet_amount"), { min: 0, max: 1 });
+    add("pet", "Pet", "type", "pet type", "pet_type",
+        c => c.config.pet_type,
+        (c, value) => ({ ...c, config: { ...c.config, pet_type: value }, pet_words: getPetWordsForType(value, c.pet_words) }));
+    add("bimbo", "Bimbo", "word_length", "max word length", "number", ...configField("bimbo_word_length"), { min: 1 });
+    add("drone", "Drone", "health", "drone health", "number", ...droneField("drone_health"), { min: 0, max: 100 });
+    for (const [key, label] of [
+        ["drone_term", "drone term"],
+        ["speech_header", "speech header"],
+        ["speech_footer", "speech footer"],
+        ["action_header", "action header"],
+        ["action_footer", "action footer"],
+        ["whisper_header", "whisper header"],
+        ["whisper_footer", "whisper footer"],
+        ["loud_header", "loud header"],
+        ["loud_footer", "loud footer"]
+    ] as const) {
+        add("drone", "Drone", key, label, "text", ...droneField(key));
+    }
+    add("censored", "Censored", "replacement", "censor replacement", "text", ...configField("censored_replacement"));
+    add("censored", "Censored", "words", "censored word", "words",
+        c => c.censored_words,
+        (c, value) => ({ ...c, censored_words: value }));
+    add("debug", "Debug mode", "enabled", "debug mode", "switch", ...configField("debug"));
+
+    const groups = [...config.rules_groups].sort((a, b) => a.order - b.order);
+    const groupLabel = (group: RuleGroup) => group.name || `Group ${group.id}`;
+    const setGroup = (groupId: number, key: keyof RuleGroup) => (c: LocalConfig, value: unknown) => ({
+        ...c,
+        rules_groups: c.rules_groups.map(group => (group.id === groupId ? { ...group, [key]: value } : group))
+    });
+    for (const group of groups) {
+        const entity = `group.${group.id}`;
+        const entityLabel = `Group: ${truncateLabel(groupLabel(group), 40)}`;
+        const get = (key: keyof RuleGroup) => (c: LocalConfig) => c.rules_groups.find(candidate => candidate.id === group.id)?.[key];
+        add(entity, entityLabel, "timer", "time", "timer", get("timeout_end"), setGroup(group.id, "timeout_end"));
+        add(entity, entityLabel, "enabled", "group", "switch", get("enabled"), setGroup(group.id, "enabled"));
+    }
+    const setRule = (ruleId: number, key: keyof Rule) => (c: LocalConfig, value: unknown) => ({
+        ...c,
+        rules: c.rules.map(rule => (rule.id === ruleId ? { ...rule, [key]: value } : rule))
+    });
+    for (const group of groups) {
+        const groupRules = config.rules.filter(rule => rule.group_id === group.id).sort((a, b) => a.order - b.order);
+        for (const rule of groupRules) {
+            const entity = `rule.${rule.id}`;
+            const entityLabel = `Rule: ${truncateLabel(`${groupLabel(group)} › ${rule.rule_regex || "(empty regex)"}`, 50)}`;
+            const get = (key: keyof Rule) => (c: LocalConfig) => c.rules.find(candidate => candidate.id === rule.id)?.[key];
+            add(entity, entityLabel, "enabled", "rule", "switch", get("enabled"), setRule(rule.id, "enabled"));
+            add(entity, entityLabel, "chance", "chance", "percent", get("chance_to_apply"), setRule(rule.id, "chance_to_apply"), { min: 0, max: 1 });
+            add(entity, entityLabel, "replacement", "replacement", "text", get("rule_replacement"), setRule(rule.id, "rule_replacement"));
+        }
+    }
+    return fields;
+}
+
+// Leaves the config as it is when the action can't apply (unknown op, unusable value).
+function applyRuleAction(config: LocalConfig, action: RuleAction, nowMs: number): LocalConfig {
+    // No field: its rule or group was removed, or a newer plugin version wrote the action.
+    const field = listRuleActionFields(config).find(candidate => candidate.target === action.target);
+    if (!field) return config;
+    const current = field.get(config);
+    const { op, value } = action;
+    let next: unknown;
+    switch (field.kind) {
+        case "timer": {
+            if (op === "permanent") next = farFuture;
+            else if (op === "off") next = epoch;
+            else {
+                const seconds = parseDuration(String(value ?? ""));
+                if (seconds !== null && op === "add") next = extendTimeout(current, nowMs, seconds);
+                if (seconds !== null && op === "remove") next = shortenTimeout(current, nowMs, seconds);
+            }
+            break;
+        }
+        case "switch":
+            if (op === "enable" || op === "disable") next = op === "enable";
+            break;
+        case "percent":
+        case "number": {
+            if (typeof value !== "number" || !Number.isFinite(value)) break;
+            const raw = op === "increase" ? current + value : op === "decrease" ? current - value : op === "set" ? value : NaN;
+            if (Number.isNaN(raw)) break;
+            const clamped = Math.min(field.max ?? Infinity, Math.max(field.min ?? -Infinity, raw));
+            next = field.kind === "percent" ? Math.round(clamped * 100) / 100 : Math.round(clamped);
+            break;
+        }
+        case "text":
+            if (op === "set" && typeof value === "string") next = value;
+            break;
+        case "words": {
+            const word = typeof value === "string" ? value.trim() : "";
+            const words = current as string[];
+            const isWord = (candidate: string) => candidate.toLowerCase() === word.toLowerCase();
+            if (!word) break;
+            if (op === "add") next = words.some(isWord) ? words : [...words, word];
+            if (op === "remove") next = words.filter(candidate => !isWord(candidate));
+            break;
+        }
+        case "pet_type":
+            if (op === "set" && petTypeOptions.some(option => option.value === value)) next = value;
+            break;
+    }
+    return next === undefined ? config : field.set(config, next);
+}
+
+function defaultRuleActionValue(kind: RuleActionKind, op: string): RuleAction["value"] {
+    if (!ruleActionTakesValue(kind, op)) return null;
+    if (kind === "timer") return "5m";
+    if (kind === "percent") return 0.1;
+    if (kind === "number") return 10;
+    if (kind === "pet_type") return petTypeOptions[0].value;
+    return "";
+}
+
+function createRuleAction(field: RuleActionField, op = ruleActionOps[field.kind][0].op): RuleAction {
+    return { target: field.target, op, value: defaultRuleActionValue(field.kind, op) };
+}
+
+// Run after removing rules or groups: drops actions aimed at them, so a rule or group created later
+// with the same id isn't targeted by surprise.
+function withoutDanglingRuleActions(config: LocalConfig): LocalConfig {
+    const targets = new Set(listRuleActionFields(config).map(field => field.target));
+    return {
+        ...config,
+        rules: config.rules.map(rule => (
+            rule.actions.every(action => targets.has(action.target))
+                ? rule
+                : { ...rule, actions: rule.actions.filter(action => targets.has(action.target)) }
+        ))
+    };
+}
+
+type FiredRuleAction = { action: RuleAction; nowMs: number; };
+
+function applyFiredRuleActions(config: LocalConfig, fired: FiredRuleAction[]): LocalConfig {
+    return fired.reduce((next, { action, nowMs }) => applyRuleAction(next, action, nowMs), config);
+}
+
+// Fired while sending and not saved yet. Saving applies them to the freshly loaded config rather
+// than writing a snapshot, so edits that reached the config in the meantime (e.g. from a remote
+// editor) survive.
+let pendingRuleActions: FiredRuleAction[] = [];
+let ruleActionSaveQueue = Promise.resolve();
+
+// Takes effect at once, so later rules and modes in the same message already see the change.
+function fireRuleActions(actions: RuleAction[]) {
+    if (!actions.length) return;
+    const nowMs = Date.now();
+    const fired = actions.map(action => ({ action, nowMs }));
+    interceptConfig = applyFiredRuleActions(interceptConfig, fired);
+    pendingRuleActions.push(...fired);
+    ruleActionSaveQueue = ruleActionSaveQueue
+        .then(saveFiredRuleActions)
+        .catch(err => console.error(`${LOG_PREFIX} saving rule action changes failed`, err));
+}
+
+async function saveFiredRuleActions() {
+    if (!pendingRuleActions.length) return;
+    const fired = pendingRuleActions;
+    pendingRuleActions = [];
+    const userId = currentUser().id;
+    const latest = activeLoopbackTransport === "desktop_http"
+        ? await readDesktopLoopbackConfig(userId)
+        : readInAppLoopbackConfig(userId);
+    await saveLocalConfig(userId, applyFiredRuleActions(latest, fired));
+    // saveLocalConfig reloaded interceptConfig from the saved config; keep what fired since.
+    interceptConfig = applyFiredRuleActions(interceptConfig, pendingRuleActions);
+}
+
 function getProfileUserId(props: any): string | null {
     const candidates = [
         props?.user?.id,
@@ -1213,32 +1506,45 @@ function getRuleRegexError(source: string): string {
     }
 }
 
+// The rule as the config has it now, or null while it, its group or the group's timer is off.
+// Looked up live because rule actions can change any of these in the middle of a message.
+function getActiveRule(ruleId: number): Rule | null {
+    const rule = interceptConfig.rules.find(candidate => candidate.id === ruleId);
+    if (!rule?.enabled || !rule.rule_regex) return null;
+    const group = interceptConfig.rules_groups.find(candidate => candidate.id === rule.group_id);
+    return group?.enabled && shouldApply(group.timeout_end) ? rule : null;
+}
+
 function applyRules(msg: string): string {
     if (!shouldApplyRules(interceptConfig.config)) return msg;
 
     let output = msg.normalize("NFKC");
-    const groups = [...interceptConfig.rules_groups]
-        .filter(group => group.enabled && shouldApply(group.timeout_end))
-        .sort((a, b) => a.order - b.order);
+    // The order is fixed up front (groups by order, then their rules by order); whether a rule runs
+    // is checked when its turn comes, so actions that switch later rules or groups count right away.
+    const groupPosition = new Map([...interceptConfig.rules_groups]
+        .sort((a, b) => a.order - b.order)
+        .map((group, position) => [group.id, position]));
+    const ruleIds = interceptConfig.rules
+        .filter(rule => groupPosition.has(rule.group_id))
+        .sort((a, b) => groupPosition.get(a.group_id)! - groupPosition.get(b.group_id)! || a.order - b.order)
+        .map(rule => rule.id);
 
-    for (const group of groups) {
-        const sortedRules = [...interceptConfig.rules]
-            .filter(rule => rule.group_id === group.id && rule.enabled)
-            .sort((a, b) => a.order - b.order);
+    for (const ruleId of ruleIds) {
+        const rule = getActiveRule(ruleId);
+        if (!rule) continue;
+        const temp = compileRuleRegex(rule.rule_regex);
+        const matchCallback = (match: string): string => {
+            const current = getActiveRule(ruleId);
+            if (!current || Math.random() > current.chance_to_apply) return match;
+            const replaced = match.replace(new RegExp(temp, "i"), current.rule_replacement);
+            fireRuleActions(current.actions);
+            return replaced;
+        };
 
-        for (const rule of sortedRules) {
-            if (!rule.rule_regex) continue;
-            const temp = compileRuleRegex(rule.rule_regex);
-            const matchCallback = (match: string): string => {
-                if (Math.random() > rule.chance_to_apply) return match;
-                return match.replace(new RegExp(temp, "i"), rule.rule_replacement);
-            };
-
-            if (rule.regex_normalize) {
-                output = new NormalizedString(output).replace(new RegExp(temp, "gi"), matchCallback);
-            } else {
-                output = output.replace(new RegExp(temp, "gi"), matchCallback);
-            }
+        if (rule.regex_normalize) {
+            output = new NormalizedString(output).replace(new RegExp(temp, "gi"), matchCallback);
+        } else {
+            output = output.replace(new RegExp(temp, "gi"), matchCallback);
         }
     }
 
@@ -2069,7 +2375,7 @@ function ConfigPanel(props: any) {
 
     const removeRuleGroup = React.useCallback((groupId: number) => {
         ruleKeysRef.current = ruleKeysRef.current.filter((_, index) => editableConfig.rules[index]?.group_id !== groupId);
-        setEditableConfig(prev => ({
+        setEditableConfig(prev => withoutDanglingRuleActions({
             ...prev,
             rules_groups: prev.rules_groups.filter(group => group.id !== groupId),
             rules: prev.rules.filter(rule => rule.group_id !== groupId)
@@ -2128,13 +2434,15 @@ function ConfigPanel(props: any) {
                 rules: [
                     ...prev.rules,
                     {
+                        id: prev.rules.reduce((maxId, rule) => Math.max(maxId, rule.id), 0) + 1,
                         rule_regex: "",
                         rule_replacement: "",
                         regex_normalize: false,
                         enabled: true,
                         chance_to_apply: 1,
                         order: nextOrder,
-                        group_id: groupId
+                        group_id: groupId,
+                        actions: []
                     }
                 ]
             };
@@ -2150,7 +2458,7 @@ function ConfigPanel(props: any) {
 
     const removeRuleAtIndex = React.useCallback((ruleIndex: number) => {
         ruleKeysRef.current.splice(ruleIndex, 1);
-        setEditableConfig(prev => ({
+        setEditableConfig(prev => withoutDanglingRuleActions({
             ...prev,
             rules: prev.rules.filter((_, index) => index !== ruleIndex)
         }));
@@ -2433,6 +2741,113 @@ function ConfigPanel(props: any) {
     };
     // Shared by the per-group column headings and each rule row so they line up.
     const ruleColumnsStyle: React.CSSProperties = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 1em minmax(0, 1fr)", gap: "8px" };
+
+    // Rule actions: pick what to change (a mode, setting, group or rule), then the change, then its value.
+    const ruleActionFields = listRuleActionFields(editableConfig);
+    const ruleActionEntities = ruleActionFields.filter((field, position) => ruleActionFields.findIndex(other => other.entity === field.entity) === position);
+    const ruleActionEntitySections: Array<[string, RuleActionField[]]> = [
+        ["Modes & settings", ruleActionEntities.filter(entity => !/^(group|rule)\./.test(entity.entity))],
+        ["Rule groups", ruleActionEntities.filter(entity => entity.entity.startsWith("group."))],
+        ["Rules", ruleActionEntities.filter(entity => entity.entity.startsWith("rule."))]
+    ];
+    const compactInputStyle: React.CSSProperties = { ...inputStyle, width: "auto", padding: "3px 6px" };
+    const renderRuleActionValue = (field: RuleActionField, action: RuleAction, setAction: (next: RuleAction) => void, invalid: boolean) => {
+        const { value } = action;
+        switch (field.kind) {
+            case "timer":
+                return (
+                    <input
+                        aria-label="Duration"
+                        aria-invalid={invalid || undefined}
+                        placeholder="5m"
+                        style={{ ...compactInputStyle, width: "90px", ...(invalid ? { borderColor: "#da373c" } : {}) }}
+                        value={String(value ?? "")}
+                        onChange={e => setAction({ ...action, value: e.currentTarget.value })}
+                    />
+                );
+            case "percent": {
+                const percent = Math.round(Number(value) * 100);
+                return (
+                    <label style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                        <input aria-label="Percent" type="number" min={0} max={100} step={1} style={{ ...compactInputStyle, width: "64px" }} value={percent} onChange={e => {
+                            setAction({ ...action, value: parseNumericInput(e.currentTarget.value, percent, { min: 0, max: 100 }) / 100 });
+                        }} />%
+                    </label>
+                );
+            }
+            case "number": {
+                // An amount to add or take away is never negative; a value to set stays in the field's range.
+                const limits = action.op === "set" ? { min: field.min, max: field.max } : { min: 0 };
+                return (
+                    <input aria-label="Amount" type="number" step={1} min={limits.min} max={limits.max} style={{ ...compactInputStyle, width: "70px" }} value={Number(value)} onChange={e => {
+                        setAction({ ...action, value: Math.round(parseNumericInput(e.currentTarget.value, Number(value), limits)) });
+                    }} />
+                );
+            }
+            case "pet_type":
+                return (
+                    <select aria-label="Pet type" style={compactInputStyle} value={Number(value)} onChange={e => setAction({ ...action, value: Number(e.currentTarget.value) })}>
+                        {petTypeOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </select>
+                );
+            default:
+                return <input aria-label={field.label} style={{ ...compactInputStyle, flex: "1 1 140px" }} value={String(value ?? "")} onChange={e => setAction({ ...action, value: e.currentTarget.value })} />;
+        }
+    };
+    const renderRuleAction = (ruleIndex: number, ruleId: number, action: RuleAction, actionIndex: number) => {
+        const field = ruleActionFields.find(candidate => candidate.target === action.target);
+        const setAction = (next: RuleAction) => updateRuleAtIndex(ruleIndex, current => ({
+            ...current,
+            actions: current.actions.map((existing, position) => (position === actionIndex ? next : existing))
+        }));
+        const choices = field
+            ? ruleActionFields
+                .filter(candidate => candidate.entity === field.entity)
+                .flatMap(candidate => ruleActionOps[candidate.kind].map(({ op, label }) => ({ field: candidate, op, label: label.replace("{field}", candidate.label) })))
+            : [];
+        const takesValue = field ? ruleActionTakesValue(field.kind, action.op) : false;
+        const durationInvalid = field?.kind === "timer" && takesValue && parseDuration(String(action.value ?? "")) === null;
+        return (
+            <div key={actionIndex} role="group" aria-label={`Action ${actionIndex + 1}`} style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
+                <select aria-label="Action target" style={compactInputStyle} value={field?.entity ?? ""} onChange={e => {
+                    const entity = e.currentTarget.value;
+                    const first = ruleActionFields.find(candidate => candidate.entity === entity);
+                    if (first) setAction(createRuleAction(first));
+                }}>
+                    {!field && <option value="">Removed target, pick another</option>}
+                    {ruleActionEntitySections.map(([label, entities]) => entities.length > 0 && (
+                        <optgroup key={label} label={label}>
+                            {entities.map(entity => (
+                                <option key={entity.entity} value={entity.entity}>
+                                    {entity.entityLabel}{entity.entity === `rule.${ruleId}` ? " (this rule)" : ""}
+                                </option>
+                            ))}
+                        </optgroup>
+                    ))}
+                </select>
+                {field && (
+                    <select aria-label="Change" style={compactInputStyle} value={`${action.target} ${action.op}`} onChange={e => {
+                        const choice = choices.find(candidate => `${candidate.field.target} ${candidate.op}` === e.currentTarget.value);
+                        if (!choice) return;
+                        const keepValue = choice.field.kind === field.kind && takesValue && ruleActionTakesValue(choice.field.kind, choice.op);
+                        setAction(keepValue ? { ...action, target: choice.field.target, op: choice.op } : createRuleAction(choice.field, choice.op));
+                    }}>
+                        {choices.map(choice => (
+                            <option key={`${choice.field.target} ${choice.op}`} value={`${choice.field.target} ${choice.op}`}>{choice.label}</option>
+                        ))}
+                    </select>
+                )}
+                {field && takesValue && renderRuleActionValue(field, action, setAction, durationInvalid)}
+                <button
+                    style={{ ...smallButtonStyle, background: "#da373c", borderColor: "#da373c" }}
+                    onClick={() => updateRuleAtIndex(ruleIndex, current => ({ ...current, actions: current.actions.filter((_, position) => position !== actionIndex) }))}
+                >
+                    Remove
+                </button>
+                {durationInvalid && <span role="alert" style={{ color: "#f23f43", fontSize: "12px" }}>Use a duration like 30s, 5m, 1h 30m or 2d.</span>}
+            </div>
+        );
+    };
 
     return (
         <div
@@ -2857,12 +3272,23 @@ function ConfigPanel(props: any) {
                                                     }} />
                                                     Normalize regex
                                                 </label>
+                                                <button style={smallButtonStyle} onClick={() => updateRuleAtIndex(index, current => ({ ...current, actions: [...current.actions, createRuleAction(ruleActionFields[0])] }))}>
+                                                    Add action
+                                                </button>
                                                 {renderOrderControls("rule", rule.order, rulePosition === 0, rulePosition === groupRules.length - 1, direction => {
                                                     const target = groupRules[rulePosition + direction];
                                                     if (target) animateReorder("r", () => reorderRule(index, target.index, direction === 1));
                                                 })}
                                                 <button style={dangerButtonStyle} onClick={() => removeRuleAtIndex(index)}>Remove Rule</button>
                                             </div>
+                                            {rule.actions.length > 0 && (
+                                                <div style={{ display: "grid", gap: "6px", borderTop: "1px solid #3f4147", paddingTop: "6px" }}>
+                                                    <span style={{ color: "#b5bac1", fontSize: "12px" }}>
+                                                        Actions run each time this rule replaces a match. To keep the matched text unchanged, use $&amp; as the replacement.
+                                                    </span>
+                                                    {rule.actions.map((action, actionIndex) => renderRuleAction(index, rule.id, action, actionIndex))}
+                                                </div>
+                                            )}
                                         </div>
                                         );
                                     })}

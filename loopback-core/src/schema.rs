@@ -23,6 +23,10 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
+    /// Stable id that rule actions use to target this rule. 0 on configs saved before ids
+    /// existed; the plugins assign ids when they load such a config.
+    #[serde(default)]
+    pub id: i64,
     pub rule_regex: String,
     pub rule_replacement: String,
     pub regex_normalize: bool,
@@ -30,6 +34,19 @@ pub struct Rule {
     pub chance_to_apply: f64,
     pub order: i64,
     pub group_id: i64,
+    #[serde(default)]
+    pub actions: Vec<RuleAction>,
+}
+
+/// A config change a rule makes each time it matches. The plugins own the meaning of
+/// `target`/`op`/`value` and ignore actions they don't understand, so this only checks the shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleAction {
+    pub target: String,
+    pub op: String,
+    #[serde(default)]
+    pub value: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,7 +222,7 @@ fn default_true() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalConfig, RuleGroup, ScopeFilterMode};
+    use super::{LocalConfig, Rule, RuleGroup, ScopeFilterMode};
 
     #[test]
     fn missing_scope_lists_default_to_empty() {
@@ -258,5 +275,29 @@ mod tests {
 
         let unnamed: RuleGroup = serde_json::from_str(r#"{"id": 2}"#).unwrap();
         assert_eq!(unnamed.name, "Unnamed Group");
+    }
+
+    #[test]
+    fn rule_id_and_actions_round_trip_and_default_when_missing() {
+        let legacy: Rule = serde_json::from_str(
+            r#"{"rule_regex": "a", "rule_replacement": "b", "regex_normalize": false, "enabled": true,
+                "chance_to_apply": 1.0, "order": 0, "group_id": 1}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.id, 0);
+        assert!(legacy.actions.is_empty());
+
+        let with_actions: Rule = serde_json::from_str(
+            r#"{"id": 4, "rule_regex": "a", "rule_replacement": "b", "regex_normalize": false, "enabled": true,
+                "chance_to_apply": 1.0, "order": 0, "group_id": 1,
+                "actions": [{"target": "gag.timer", "op": "add", "value": "5m"},
+                            {"target": "rule.4.enabled", "op": "disable"}]}"#,
+        )
+        .unwrap();
+        let reparsed: Rule = serde_json::from_value(serde_json::to_value(&with_actions).unwrap()).unwrap();
+        assert_eq!(reparsed.id, 4);
+        assert_eq!(reparsed.actions.len(), 2);
+        assert_eq!(reparsed.actions[0].value, serde_json::json!("5m"));
+        assert!(reparsed.actions[1].value.is_null());
     }
 }
