@@ -205,7 +205,7 @@ fn default_true() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalConfig, ScopeFilterMode};
+    use super::{LocalConfig, RuleGroup, ScopeFilterMode};
 
     #[test]
     fn missing_scope_lists_default_to_empty() {
@@ -247,5 +247,16 @@ mod tests {
         assert!(parsed.whitelist.is_empty());
         assert!(parsed.blacklist.is_empty());
         assert!(matches!(parsed.filter_mode, ScopeFilterMode::Whitelist));
+    }
+
+    #[test]
+    fn rule_group_name_round_trips_and_defaults_when_missing() {
+        let named: RuleGroup = serde_json::from_str(r#"{"id": 1, "name": "Morning"}"#).unwrap();
+        assert_eq!(named.name, "Morning");
+        let reparsed: RuleGroup = serde_json::from_value(serde_json::to_value(&named).unwrap()).unwrap();
+        assert_eq!(reparsed.name, "Morning");
+
+        let unnamed: RuleGroup = serde_json::from_str(r#"{"id": 2}"#).unwrap();
+        assert_eq!(unnamed.name, "Unnamed Group");
     }
 }
