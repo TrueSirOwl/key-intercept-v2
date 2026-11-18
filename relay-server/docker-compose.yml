@@ -1,0 +1,13 @@
+# Self-hosted relay. In Portainer: Stacks > Add stack > Repository, compose path relay-server/docker-compose.yml.
+# Clients only accept the relay over HTTPS, so put it behind a reverse proxy with a certificate.
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: relay-server/Dockerfile
+    image: key-intercept-relay:latest
+    restart: unless-stopped
+    ports:
+      - "35491:35491"
+    environment:
+      RUST_LOG: relay_server=info
