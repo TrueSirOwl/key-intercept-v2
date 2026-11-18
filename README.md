@@ -207,6 +207,14 @@ A rule has 2 main components:
 
 There are other components to a rule such as the chance for it to activate, but I will leave you to discover these in your own time.
 
+A rule can also have **actions**: changes to the rest of the config that happen each time the rule replaces a match. An action can:
+ - add or remove time from a mode or rule group, make it permanent or turn it off
+ - enable or disable rule groups, other rules, or the rule itself
+ - raise, lower or set the pet amount, a rule's chance, drone health or the bimbo word length
+ - set the pet type, change text settings such as drone headers/footers or a rule's replacement, and add or remove censored words
+
+Durations are written like `30s`, `5m`, `1h 30m` or `2d`. Actions take effect straight away, so the rest of the same message already uses the change. To trigger an action without changing the matched text, use `$&` as the replacement. Sub Control and the whitelist can't be changed by actions.
+
 Rule groups can also be set to disable after a period of time, the same as the pre-build modes.
 
 ### Whitelist
