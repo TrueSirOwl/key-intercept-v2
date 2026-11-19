@@ -16,6 +16,9 @@ pub struct Config {
     pub censored_end: String,
     pub censored_replacement: String,
     pub debug: bool,
+    /// Added below a message in debug mode; `{original}` stands for the message before changes.
+    #[serde(default = "default_debug_message")]
+    pub debug_message: String,
     #[serde(default)]
     pub blocked_by_dom: bool,
 }
@@ -134,6 +137,7 @@ impl Default for LocalConfig {
                 censored_end: "1970-01-01T00:00:00.000Z".to_string(),
                 censored_replacement: "*".to_string(),
                 debug: false,
+                debug_message: default_debug_message(),
                 blocked_by_dom: false,
             },
             rules: vec![],
@@ -216,6 +220,10 @@ fn default_group_name() -> String {
     "Unnamed Group".to_string()
 }
 
+fn default_debug_message() -> String {
+    "(original message: {original})".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -264,6 +272,7 @@ mod tests {
         assert!(parsed.whitelist.is_empty());
         assert!(parsed.blacklist.is_empty());
         assert!(matches!(parsed.filter_mode, ScopeFilterMode::Whitelist));
+        assert_eq!(parsed.config.debug_message, "(original message: {original})");
     }
 
     #[test]

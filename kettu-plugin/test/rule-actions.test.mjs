@@ -106,6 +106,8 @@ assert.equal(harness.parseDuration("5 minutes"), null);
     assert.deepEqual(run("censored.words", "add", "bad").censored_words, ["Bad"], "no duplicate words, ignoring case");
     assert.deepEqual(run("censored.words", "remove", "BAD").censored_words, []);
     assert.equal(run("debug.enabled", "enable", null).config.debug, true);
+    assert.equal(base.config.debug_message, "(original message: {original})", "configs without a debug message get the default");
+    assert.equal(run("debug.message", "set", "(was: {original})").config.debug_message, "(was: {original})");
 
     assert.equal(run("group.2.enabled", "enable", null).rules_groups[0].enabled, true);
     assert.equal(run("group.2.timer", "add", "10m").rules_groups[0].timeout_end, iso(now + 600_000));

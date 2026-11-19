@@ -49,6 +49,7 @@ type Config = {
     censored_end: string;
     censored_replacement: string;
     debug: boolean;
+    debug_message: string;
     blocked_by_dom: boolean;
 };
 
@@ -188,6 +189,9 @@ const petWordsByType: Record<number, string[]> = {
     7: ["squeak", "pyon"]
 };
 
+// Added below a message in debug mode; {original} stands for the message before changes.
+const DEFAULT_DEBUG_MESSAGE = "(original message: {original})";
+
 const defaultLocalConfig: LocalConfig = {
     config: {
         rules_end: farFuture,
@@ -203,6 +207,7 @@ const defaultLocalConfig: LocalConfig = {
         censored_end: epoch,
         censored_replacement: "*",
         debug: false,
+        debug_message: DEFAULT_DEBUG_MESSAGE,
         blocked_by_dom: false
     },
     rules: [],
@@ -358,6 +363,7 @@ function mergeLocalConfig(raw: unknown): LocalConfig {
     } as Config;
     // The loopback rejects an empty replacement (400); fall back while the field is being cleared/retyped.
     if (!mergedConfig.censored_replacement) mergedConfig.censored_replacement = defaultLocalConfig.config.censored_replacement;
+    if (typeof mergedConfig.debug_message !== "string") mergedConfig.debug_message = DEFAULT_DEBUG_MESSAGE;
 
     return {
         config: mergedConfig,
@@ -1227,6 +1233,7 @@ function listRuleActionFields(config: LocalConfig): RuleActionField[] {
         c => c.censored_words,
         (c, value) => ({ ...c, censored_words: value }));
     add("debug", "Debug mode", "enabled", "debug mode", "switch", ...configField("debug"));
+    add("debug", "Debug mode", "message", "debug message", "text", ...configField("debug_message"));
 
     const groups = [...config.rules_groups].sort((a, b) => a.order - b.order);
     const groupLabel = (group: RuleGroup) => group.name || `Group ${group.id}`;
@@ -1930,7 +1937,8 @@ function applyReplacements(msg: string, channelId: string): string {
     });
 
     if (interceptConfig.config.debug) {
-        return `${msg}\n(original message: ${originalMsg})`;
+        const note = interceptConfig.config.debug_message.split("{original}").join(originalMsg);
+        return note ? `${msg}\n${note}` : msg;
     }
 
     return msg;
@@ -3115,6 +3123,10 @@ function ConfigPanel(props: any) {
                                 />
                                 Debug mode
                             </label>
+                            <label>Debug message ({"{original}"} is the message before changes; empty adds nothing)<input style={inputStyle} value={editableConfig.config.debug_message} onChange={e => {
+                                const nextValue = e.currentTarget.value;
+                                setEditableConfig(prev => ({ ...prev, config: { ...prev.config, debug_message: nextValue } }));
+                            }} /></label>
                         </div>
                     </CollapsibleSection>
 

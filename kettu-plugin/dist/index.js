@@ -41,6 +41,9 @@ const petWordsByType = {
     7: ["squeak", "pyon"]
 };
 
+// Added below a message in debug mode; {original} stands for the message before changes.
+const DEFAULT_DEBUG_MESSAGE = "(original message: {original})";
+
 const defaultLocalConfig = {
     config: {
         rules_end: farFuture,
@@ -56,6 +59,7 @@ const defaultLocalConfig = {
         censored_end: epoch,
         censored_replacement: "*",
         debug: false,
+        debug_message: DEFAULT_DEBUG_MESSAGE,
         blocked_by_dom: false
     },
     rules: [],
@@ -290,6 +294,7 @@ function listRuleActionFields(config) {
         c => c.censored_words,
         (c, value) => ({ ...c, censored_words: value }));
     add("debug", "Debug mode", "enabled", "debug mode", "switch", ...configField("debug"));
+    add("debug", "Debug mode", "message", "debug message", "text", ...configField("debug_message"));
 
     const groups = [...config.rules_groups].sort((a, b) => a.order - b.order);
     const groupLabel = group => group.name || `Group ${group.id}`;
@@ -614,12 +619,14 @@ function mergeLocalConfig(raw) {
         : [];
     const sharedScopeList = createSharedScopeList(source.whitelist, source.blacklist);
     const mergedFilterMode = source.filter_mode === "blacklist" ? "blacklist" : "whitelist";
+    const mergedConfig = {
+        ...defaultLocalConfig.config,
+        ...((source.config) ?? {})
+    };
+    if (typeof mergedConfig.debug_message !== "string") mergedConfig.debug_message = DEFAULT_DEBUG_MESSAGE;
 
     return {
-        config: {
-            ...defaultLocalConfig.config,
-            ...((source.config) ?? {})
-        },
+        config: mergedConfig,
         rules: mergedRules,
         rules_groups: mergedGroups,
         whitelist: sharedScopeList,
@@ -664,6 +671,7 @@ function applyRawJsonConfigPatch(currentConfig, rawJsonText) {
         censored_end: value => typeof value === "string",
         censored_replacement: value => typeof value === "string",
         debug: value => typeof value === "boolean",
+        debug_message: value => typeof value === "string",
         blocked_by_dom: value => typeof value === "boolean"
     };
     Object.keys(configFieldSpecs).forEach(key => {
@@ -1902,7 +1910,8 @@ function applyReplacements(msg, channelId) {
         transformed: msg
     });
     if (interceptConfig.config.debug) {
-        return `${msg}\n(original message: ${originalMsg})`;
+        const note = interceptConfig.config.debug_message.split("{original}").join(originalMsg);
+        return note ? `${msg}\n${note}` : msg;
     }
     return msg;
 }
@@ -3369,7 +3378,23 @@ function ConfigPanel(props) {
                         }
                     }));
                 }, { active: editableConfig.config.debug, noTopMargin: true, key: "debug-toggle" })
-            )
+            ),
+            h(Text, { style: { color: "#f2f3f5", marginTop: 6 } }, "Debug message ({original} is the message before changes; empty adds nothing)"),
+            h(TextInput, {
+                value: editableConfig.config.debug_message,
+                onChangeText: value => {
+                    setEditableConfig(prev => ({
+                        ...prev,
+                        config: {
+                            ...prev.config,
+                            debug_message: value
+                        }
+                    }));
+                },
+                autoCapitalize: "none",
+                autoCorrect: false,
+                style: inputStyle
+            })
         )) : null,
 
         (isOwnProfile && !blocked_by_dom) || (!isOwnProfile && canViewRemote) ? rulesEditor : null,
