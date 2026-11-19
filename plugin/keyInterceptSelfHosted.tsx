@@ -71,6 +71,8 @@ type RuleAction = {
     target: string;
     op: string;
     value: number | string | null;
+    // Unset: the default for the target (see triggersAfterMessage).
+    after_message?: boolean;
 };
 
 type RuleGroup = {
@@ -302,7 +304,8 @@ function mergeRuleActions(raw: unknown): RuleAction[] {
         .map(action => ({
             target: action.target as string,
             op: action.op as string,
-            value: typeof action.value === "number" || typeof action.value === "string" ? action.value : null
+            value: typeof action.value === "number" || typeof action.value === "string" ? action.value : null,
+            ...(typeof action.after_message === "boolean" ? { after_message: action.after_message } : {})
         }));
 }
 
@@ -1355,21 +1358,23 @@ function applyFiredRuleActions(config: LocalConfig, fired: FiredRuleAction[]): L
 let pendingRuleActions: FiredRuleAction[] = [];
 let ruleActionSaveQueue = Promise.resolve();
 
-// Changes to rules and groups take effect at once, so a rule can switch itself off after one match
-// or switch on a later group for the same message. Everything else (modes and their settings) is
-// held until the message is done, so a "gag me" rule doesn't gag the message that triggered it.
+// An action triggers before the message (it already changes the message that triggered it) or after
+// it (held until the message is done, so a "gag me" rule doesn't gag its own message). Each action can
+// choose; by default changes to rules and groups trigger before, so a rule can switch itself off after
+// one match or switch on a later group for the same message, and everything else (modes and their
+// settings) triggers after.
 let heldRuleActions: FiredRuleAction[] = [];
 
-function changesRules(action: RuleAction): boolean {
-    return action.target.startsWith("rule.") || action.target.startsWith("group.");
+function triggersAfterMessage(action: RuleAction): boolean {
+    return action.after_message ?? !(action.target.startsWith("rule.") || action.target.startsWith("group."));
 }
 
 function fireRuleActions(actions: RuleAction[]) {
     if (!actions.length) return;
     const nowMs = Date.now();
     const fired = actions.map(action => ({ action, nowMs }));
-    heldRuleActions.push(...fired.filter(({ action }) => !changesRules(action)));
-    commitRuleActions(fired.filter(({ action }) => changesRules(action)));
+    heldRuleActions.push(...fired.filter(({ action }) => triggersAfterMessage(action)));
+    commitRuleActions(fired.filter(({ action }) => !triggersAfterMessage(action)));
 }
 
 // Called once the message is done.
@@ -2890,12 +2895,15 @@ function ConfigPanel(props: any) {
             : [];
         const takesValue = field ? ruleActionTakesValue(field.kind, action.op) : false;
         const durationInvalid = field?.kind === "timer" && takesValue && parseDuration(String(action.value ?? "")) === null;
+        // A new target or change keeps the before/after choice made for this action.
+        const keepTiming = (next: RuleAction): RuleAction => (action.after_message === undefined ? next : { ...next, after_message: action.after_message });
+        const after = triggersAfterMessage(action);
         return (
             <div key={actionIndex} role="group" aria-label={`Action ${actionIndex + 1}`} style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
                 <select aria-label="Action target" style={compactInputStyle} value={field?.entity ?? ""} onChange={e => {
                     const entity = e.currentTarget.value;
                     const first = ruleActionFields.find(candidate => candidate.entity === entity);
-                    if (first) setAction(createRuleAction(first));
+                    if (first) setAction(keepTiming(createRuleAction(first)));
                 }}>
                     {!field && <option value="">Removed target, pick another</option>}
                     {ruleActionEntitySections.map(([label, entities]) => entities.length > 0 && (
@@ -2913,7 +2921,7 @@ function ConfigPanel(props: any) {
                         const choice = choices.find(candidate => `${candidate.field.target} ${candidate.op}` === e.currentTarget.value);
                         if (!choice) return;
                         const keepValue = choice.field.kind === field.kind && takesValue && ruleActionTakesValue(choice.field.kind, choice.op);
-                        setAction(keepValue ? { ...action, target: choice.field.target, op: choice.op } : createRuleAction(choice.field, choice.op));
+                        setAction(keepValue ? { ...action, target: choice.field.target, op: choice.op } : keepTiming(createRuleAction(choice.field, choice.op)));
                     }}>
                         {choices.map(choice => (
                             <option key={`${choice.field.target} ${choice.op}`} value={`${choice.field.target} ${choice.op}`}>{choice.label}</option>
@@ -2921,6 +2929,11 @@ function ConfigPanel(props: any) {
                     </select>
                 )}
                 {field && takesValue && renderRuleActionValue(field, action, setAction, durationInvalid)}
+                {field && (
+                    <button style={smallButtonStyle} aria-pressed={after} title="Before: the change already applies to the message that triggered it. After: it starts with the next message." onClick={() => setAction({ ...action, after_message: !after })}>
+                        {after ? "Trigger after the message" : "Trigger before the message"}
+                    </button>
+                )}
                 <button
                     style={{ ...smallButtonStyle, background: "#da373c", borderColor: "#da373c" }}
                     onClick={() => updateRuleAtIndex(ruleIndex, current => ({ ...current, actions: current.actions.filter((_, position) => position !== actionIndex) }))}
