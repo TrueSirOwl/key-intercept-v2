@@ -29,7 +29,11 @@ const DEVELOPER_MODE_ENABLED = (() => {
     }
     return false;
 })();
-const DEFAULT_RELAY_URL = DEVELOPER_MODE_ENABLED ? "http://127.0.0.1:46001" : "https://kirelay.thomaslower.com";
+// The installer puts the relay chosen during install here, making it the default of the relay setting.
+const INSTALLER_RELAY_URL = "__KEY_INTERCEPT_INSTALLER_RELAY_URL__";
+const DEFAULT_RELAY_URL = /^https?:\/\//.test(INSTALLER_RELAY_URL)
+    ? INSTALLER_RELAY_URL
+    : DEVELOPER_MODE_ENABLED ? "http://127.0.0.1:46001" : "https://kirelay.thomaslower.com";
 
 type Config = {
     rules_end: string;
@@ -723,6 +727,48 @@ function relayBaseUrl(relayUrl: string): string {
     } catch {
         return trimmed.replace(/\/$/, "");
     }
+}
+
+// The relay setting is all it takes to move to another relay: Discord is asked to allow connections
+// to it (Vencord shows a confirmation, then Discord needs a restart), and the loopback is told to
+// register there, so others reach this user's config through the same relay.
+async function applyRelaySetting(relayUrl: string) {
+    const url = relayBaseUrl(relayUrl);
+    let parsed: URL;
+    try {
+        parsed = new URL(url);
+    } catch {
+        return;
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
+
+    const csp = VencordNative?.csp;
+    if (csp && !isLoopbackHostname(parsed.hostname) && !await csp.isDomainAllowed(url, ["connect-src"])) {
+        const result = await csp.requestAddOverride(url, ["connect-src"], "Key Intercept");
+        console.info(`${LOG_PREFIX} relay permission for ${parsed.host}: ${result}`);
+    }
+
+    if (activeLoopbackTransport !== "desktop_http") return;
+    const response = await fetch(`${LOOPBACK}/relay`, {
+        method: "PUT",
+        headers: {
+            "content-type": "application/json",
+            "x-discord-user-id": currentUser().id
+        },
+        body: JSON.stringify({ relay_url: url })
+    });
+    if (!response.ok) throw new Error(`Failed switching the loopback to ${url}: ${response.status}`);
+}
+
+let relaySettingTimer: ReturnType<typeof setTimeout> | undefined;
+
+// The setting changes on every keystroke; act once typing has paused.
+function scheduleApplyRelaySetting() {
+    clearTimeout(relaySettingTimer);
+    relaySettingTimer = setTimeout(() => {
+        applyRelaySetting(settings.store.relayUrl)
+            .catch(err => console.warn(`${LOG_PREFIX} applying the relay setting failed`, err));
+    }, 1500);
 }
 
 async function pushRemoteConfig(
@@ -3445,8 +3491,9 @@ function ConfigPanel(props: any) {
 const settings = definePluginSettings({
     relayUrl: {
         type: OptionType.STRING,
-        description: "Public relay URL",
-        default: DEFAULT_RELAY_URL
+        description: "Public relay URL. Changing it moves this machine to that relay; Discord asks to allow it, then needs a restart.",
+        default: DEFAULT_RELAY_URL,
+        onChange: scheduleApplyRelaySetting
     },
     loopbackTransportMode: {
         type: OptionType.STRING,
@@ -3477,9 +3524,13 @@ const plugin = definePlugin({
         } catch (err) {
             console.error("key-intercept failed to load local config", err);
         }
+        // Not awaited: the permission dialog waits for the user.
+        applyRelaySetting(settings.store.relayUrl)
+            .catch(err => console.warn(`${LOG_PREFIX} applying the relay setting failed`, err));
     },
     stop() {
         stopDesktopConfigBackgroundSync();
+        clearTimeout(relaySettingTimer);
     },
     onBeforeMessageSend(channelId: string, msg: { content: string }) {
         const channel = ChannelStore?.getChannel?.(channelId);

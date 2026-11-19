@@ -217,6 +217,12 @@ Durations are written like `30s`, `5m`, `1h 30m` or `2d`. Actions take effect st
 
 Rule groups can also be set to disable after a period of time, the same as the pre-build modes.
 
+### Relay
+
+Configs travel between users through a relay server, and people can only reach each other's configs when they use the same relay. To switch relays on PC, change **Public relay URL** in the plugin's settings (Discord settings -> Vencord -> Plugins -> key-intercept). Discord asks whether to allow connections to the new relay; tick the box, click Allow, then fully restart Discord. The loopback moves to the new relay by itself. On mobile, set **Relay URL** in the plugin's config panel.
+
+To host your own relay, build `relay-server/Dockerfile` (or deploy `relay-server/docker-compose.yml`, e.g. as a Portainer stack from this repository) and put it behind HTTPS with a valid certificate: Discord refuses plain `http` relays.
+
 ### Whitelist
 The whitelist allows you to specify which servers you want the plugin to run on. It will only run on the selected servers / DM's.
 
