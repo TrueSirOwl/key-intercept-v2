@@ -213,7 +213,7 @@ A rule can also have **actions**: changes to the rest of the config that happen 
  - raise, lower or set the pet amount, a rule's chance, drone health or the bimbo word length
  - set the pet type, change text settings such as drone headers/footers or a rule's replacement, and add or remove censored words
 
-Durations are written like `30s`, `5m`, `1h 30m` or `2d`. Actions that change rules or groups take effect straight away, so a rule can switch itself off after one match or switch on another group for the rest of the same message. All other actions (modes and their settings) start with the next message, so a rule for "gag me" doesn't gag the message that triggered it. To trigger an action without changing the matched text, use `$&` as the replacement. Sub Control and the whitelist can't be changed by actions.
+Durations are written like `30s`, `5m`, `1h 30m` or `2d`. Each action triggers either before the message, so it already changes the message that triggered it, or after it, so it starts with the next message. Switch between them with the action's **Trigger before/after the message** button. By default, actions that change rules or groups trigger before, so a rule can switch itself off after one match or switch on another group for the rest of the same message. All other actions (modes and their settings) trigger after, so a rule for "gag me" doesn't gag the message that triggered it. To trigger an action without changing the matched text, use `$&` as the replacement. Sub Control and the whitelist can't be changed by actions.
 
 Rule groups can also be set to disable after a period of time, the same as the pre-build modes.
 

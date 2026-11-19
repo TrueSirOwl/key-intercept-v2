@@ -50,6 +50,9 @@ pub struct RuleAction {
     pub op: String,
     #[serde(default)]
     pub value: serde_json::Value,
+    /// Whether the change waits until the message is done; unset means the plugins' default for the target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_message: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,6 +298,18 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.id, 0);
         assert!(legacy.actions.is_empty());
+
+        let timed: Rule = serde_json::from_str(
+            r#"{"rule_regex": "a", "rule_replacement": "b", "regex_normalize": false, "enabled": true,
+                "chance_to_apply": 1.0, "order": 0, "group_id": 1,
+                "actions": [{"target": "gag.timer", "op": "add", "value": "5m", "after_message": false},
+                            {"target": "gag.timer", "op": "add", "value": "5m"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(timed.actions[0].after_message, Some(false));
+        assert_eq!(timed.actions[1].after_message, None);
+        let saved = serde_json::to_value(&timed).unwrap();
+        assert!(saved["actions"][1].get("after_message").is_none(), "an unset choice isn't written");
 
         let with_actions: Rule = serde_json::from_str(
             r#"{"id": 4, "rule_regex": "a", "rule_replacement": "b", "regex_normalize": false, "enabled": true,

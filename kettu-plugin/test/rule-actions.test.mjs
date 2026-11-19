@@ -166,4 +166,36 @@ assert.equal(harness.parseDuration("5 minutes"), null);
     assert.equal(saved.drone_config.drone_term, "Unit", "the remote edit made meanwhile was kept");
 }
 
+// Each action can choose to trigger before the message (already changing it) or after it.
+{
+    harness.load({
+        config: { gag_end: epoch },
+        rules_groups: [
+            { id: 1, name: "Triggers", enabled: true, timeout_end: farFuture, order: 0 },
+            { id: 2, name: "Later", enabled: false, timeout_end: farFuture, order: 1 }
+        ],
+        rules: [
+            { id: 1, rule_regex: "gag me", rule_replacement: "$&", chance_to_apply: 1, order: 0, group_id: 1, actions: [
+                { target: "gag.timer", op: "add", value: "5m", after_message: false },
+                { target: "group.2.enabled", op: "enable", value: null, after_message: true }
+            ] },
+            { id: 2, rule_regex: "hello", rule_replacement: "HI", chance_to_apply: 1, order: 0, group_id: 2, actions: [] }
+        ]
+    });
+    assert.deepEqual(harness.config.rules[0].actions.map(action => action.after_message), [false, true], "the choice survives loading");
+    assert.equal(harness.applyRules("gag me hello"), "gag me hello", "a group switched on after the message doesn't change it");
+    assert.notEqual(harness.config.config.gag_end, epoch, "a gag set to trigger before the message applies at once");
+    assert.equal(harness.config.rules_groups.find(group => group.id === 2).enabled, false);
+    harness.applyHeldRuleActions();
+    assert.equal(harness.config.rules_groups.find(group => group.id === 2).enabled, true, "the group switches on once the message is done");
+    await harness.saved();
+    assert.deepEqual(harness.mergeLocalConfig(harness.stored).rules[0].actions.map(action => action.after_message), [false, true], "the choice is saved");
+
+    const malformed = harness.mergeLocalConfig({
+        rules: [{ id: 1, rule_regex: "a", group_id: 1, actions: [{ target: "gag.timer", op: "add", value: "5m", after_message: "yes" }] }],
+        rules_groups: [{ id: 1 }]
+    });
+    assert.equal("after_message" in malformed.rules[0].actions[0], false, "a malformed choice is dropped, leaving the default");
+}
+
 console.log("rule actions test passed");

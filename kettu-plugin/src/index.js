@@ -415,21 +415,23 @@ function applyFiredRuleActions(config, fired) {
 let pendingRuleActions = [];
 let ruleActionSaveQueue = Promise.resolve();
 
-// Changes to rules and groups take effect at once, so a rule can switch itself off after one match
-// or switch on a later group for the same message. Everything else (modes and their settings) is
-// held until the message is done, so a "gag me" rule doesn't gag the message that triggered it.
+// An action triggers before the message (it already changes the message that triggered it) or after
+// it (held until the message is done, so a "gag me" rule doesn't gag its own message). Each action can
+// choose; by default changes to rules and groups trigger before, so a rule can switch itself off after
+// one match or switch on a later group for the same message, and everything else (modes and their
+// settings) triggers after.
 let heldRuleActions = [];
 
-function changesRules(action) {
-    return action.target.startsWith("rule.") || action.target.startsWith("group.");
+function triggersAfterMessage(action) {
+    return action.after_message ?? !(action.target.startsWith("rule.") || action.target.startsWith("group."));
 }
 
 function fireRuleActions(actions) {
     if (!actions.length) return;
     const nowMs = Date.now();
     const fired = actions.map(action => ({ action, nowMs }));
-    heldRuleActions.push(...fired.filter(({ action }) => !changesRules(action)));
-    commitRuleActions(fired.filter(({ action }) => changesRules(action)));
+    heldRuleActions.push(...fired.filter(({ action }) => triggersAfterMessage(action)));
+    commitRuleActions(fired.filter(({ action }) => !triggersAfterMessage(action)));
 }
 
 // Called once the message is done.
@@ -586,7 +588,8 @@ function mergeRuleActions(raw) {
         .map(action => ({
             target: action.target,
             op: action.op,
-            value: typeof action.value === "number" || typeof action.value === "string" ? action.value : null
+            value: typeof action.value === "number" || typeof action.value === "string" ? action.value : null,
+            ...(typeof action.after_message === "boolean" ? { after_message: action.after_message } : {})
         }));
 }
 
@@ -2890,22 +2893,27 @@ function ConfigPanel(props) {
         const currentChoice = choices.find(choice => choice.field.target === action.target && choice.op === action.op);
         const takesValue = field ? ruleActionTakesValue(field.kind, action.op) : false;
         const durationInvalid = field?.kind === "timer" && takesValue && parseDuration(String(action.value ?? "")) === null;
+        // A new target or change keeps the before/after choice made for this action.
+        const keepTiming = next => (action.after_message === undefined ? next : { ...next, after_message: action.after_message });
+        const after = triggersAfterMessage(action);
         return h(
             View,
             { key: `action-${pickerKey}`, style: { marginTop: 6, borderWidth: 1, borderColor: "#3f4147", borderRadius: 8, padding: 8 } },
             button(field ? entityLabel(field) : "Removed target, pick another", () => togglePicker("entity"), { key: `${pickerKey}-entity`, noTopMargin: true }),
             openActionPicker === `${pickerKey}:entity` ? chipRow(`${pickerKey}-entities`, ruleActionEntities.map(entity => button(entityLabel(entity), () => {
-                setAction(createRuleAction(entity));
+                setAction(keepTiming(createRuleAction(entity)));
                 setOpenActionPicker(null);
             }, { key: `${pickerKey}-entity-${entity.entity}`, active: entity.entity === field?.entity, noTopMargin: true }))) : null,
             field ? button(currentChoice?.label ?? action.op, () => togglePicker("op"), { key: `${pickerKey}-op` }) : null,
             openActionPicker === `${pickerKey}:op` ? chipRow(`${pickerKey}-ops`, choices.map(choice => button(choice.label, () => {
                 const keepValue = choice.field.kind === field.kind && takesValue && ruleActionTakesValue(choice.field.kind, choice.op);
-                setAction(keepValue ? { ...action, target: choice.field.target, op: choice.op } : createRuleAction(choice.field, choice.op));
+                setAction(keepValue ? { ...action, target: choice.field.target, op: choice.op } : keepTiming(createRuleAction(choice.field, choice.op)));
                 setOpenActionPicker(null);
             }, { key: `${pickerKey}-op-${choice.field.target}-${choice.op}`, active: choice === currentChoice, noTopMargin: true }))) : null,
             field && takesValue ? renderRuleActionValue(field, action, setAction, pickerKey, durationInvalid) : null,
             durationInvalid ? h(Text, { style: { color: "#f23f43", marginTop: 4 } }, "Use a duration like 30s, 5m, 1h 30m or 2d.") : null,
+            field ? button(after ? "Trigger after the message" : "Trigger before the message", () => setAction({ ...action, after_message: !after }), { key: `${pickerKey}-timing` }) : null,
+            field ? h(Text, { style: { color: "#b5bac1", marginTop: 4 } }, "Before: the change already applies to the message that triggered it. After: it starts with the next message.") : null,
             button("Remove action", () => updateRuleAtIndex(ruleIndex, current => ({
                 ...current,
                 actions: current.actions.filter((_, position) => position !== actionIndex)
