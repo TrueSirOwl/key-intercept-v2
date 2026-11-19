@@ -11,6 +11,7 @@ const MOBILE_STATE_KEY = "key-intercept/mobile-loopback-state/v1";
 const PANEL_COLLAPSED_KEY = "panel";
 const SECTION_COLLAPSED_KEY_PREFIX = "section/";
 const RULE_GROUP_COLLAPSED_KEY_PREFIX = "ruleGroup/";
+const RULE_COLLAPSED_KEY_PREFIX = "rule/";
 const DEVELOPER_MODE_ENABLED = (() => {
     const values: unknown[] = [];
     try {
@@ -2241,7 +2242,7 @@ function ConfigPanel(props: any) {
     const [nowMs, setNowMs] = React.useState(() => Date.now());
     const [canViewRemote, setCanViewRemote] = React.useState(isOwnProfile);
     const [isPanelCollapsed, togglePanelCollapsed] = usePersistedCollapsed(PANEL_COLLAPSED_KEY, profileUserId);
-    const [isRuleGroupKeyCollapsed, toggleRuleGroupKey] = usePersistedCollapsedKeys(profileUserId);
+    const [isRulesEditorKeyCollapsed, toggleRulesEditorKey] = usePersistedCollapsedKeys(profileUserId);
     const skipAutosaveRef = React.useRef(true);
     const lastSavedSnapshotRef = React.useRef("");
     const saveQueueRef = React.useRef(Promise.resolve());
@@ -2773,7 +2774,7 @@ function ConfigPanel(props: any) {
     // whole animation (a pinned header would otherwise be carried off-screen when its group shrinks),
     // so the cursor stays over the toggle.
     const toggleRuleGroupCollapsed = (groupId: number, trigger: HTMLElement) => {
-        toggleRuleGroupKey(`${RULE_GROUP_COLLAPSED_KEY_PREFIX}${groupId}`);
+        toggleRulesEditorKey(`${RULE_GROUP_COLLAPSED_KEY_PREFIX}${groupId}`);
         const header = trigger.closest(`.${GROUP_HEADER_CLASS}`);
         const scroller = rulesEditorScrollRef.current;
         if (!header || !scroller) return;
@@ -2838,7 +2839,8 @@ function ConfigPanel(props: any) {
         );
     };
     // Shared by the per-group column headings and each rule row so they line up.
-    const ruleColumnsStyle: React.CSSProperties = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 1em minmax(0, 1fr)", gap: "8px" };
+    // First column: the rule's collapse toggle.
+    const ruleColumnsStyle: React.CSSProperties = { display: "grid", gridTemplateColumns: "28px minmax(0, 1fr) 1em minmax(0, 1fr)", gap: "8px" };
 
     // Rule actions: pick what to change (a mode, setting, group or rule), then the change, then its value.
     const ruleActionFields = listRuleActionFields(editableConfig);
@@ -3256,7 +3258,7 @@ function ConfigPanel(props: any) {
                                 .map((rule, index) => ({ rule, index }))
                                 .filter(item => item.rule.group_id === group.id)
                                 .sort((a, b) => a.rule.order - b.rule.order);
-                            const isGroupCollapsed = isRuleGroupKeyCollapsed(`${RULE_GROUP_COLLAPSED_KEY_PREFIX}${group.id}`);
+                            const isGroupCollapsed = isRulesEditorKeyCollapsed(`${RULE_GROUP_COLLAPSED_KEY_PREFIX}${group.id}`);
                             const isGroupAdvancedOpen = advancedRuleGroups[group.id] ?? false;
 
                             return (
@@ -3348,6 +3350,7 @@ function ConfigPanel(props: any) {
                                         <div className={RULES_COLLAPSE_CLASS} data-collapsed={isGroupCollapsed} aria-hidden="true">
                                             <div>
                                                 <div style={{ ...ruleColumnsStyle, padding: "8px 9px 0", color: "#b5bac1", fontWeight: 600 }}>
+                                                    <span />
                                                     <span>Regex</span>
                                                     <span />
                                                     <span>Replacement</span>
@@ -3367,6 +3370,13 @@ function ConfigPanel(props: any) {
                                         const ruleKey = ruleKeys[index];
                                         const regexError = getRuleRegexError(rule.rule_regex);
                                         const regexErrorId = `key-intercept-rule-${ruleKey}-regex-error`;
+                                        // Collapsed: only regex -> replacement stays, with a short summary of the rest.
+                                        const isRuleCollapsed = isRulesEditorKeyCollapsed(`${RULE_COLLAPSED_KEY_PREFIX}${rule.id}`);
+                                        const ruleSummary = [
+                                            `${rule.actions.length} ${rule.actions.length === 1 ? "action" : "actions"}`,
+                                            `${Math.round(rule.chance_to_apply * 100)}% chance`,
+                                            ...(rule.enabled ? [] : ["disabled"])
+                                        ].join(" · ");
                                         return (
                                         <div
                                             key={ruleKey}
@@ -3374,6 +3384,16 @@ function ConfigPanel(props: any) {
                                             style={{ background: RULE_BG, border: "1px solid #3f4147", borderRadius: "8px", padding: "8px", display: "grid", gap: "6px", opacity: rule.enabled ? 1 : 0.6, ...reorderDragStyle(`r-${ruleKey}`) }}
                                         >
                                             <div style={{ ...ruleColumnsStyle, alignItems: "center" }}>
+                                                <button
+                                                    type="button"
+                                                    className={COLLAPSE_TOGGLE_CLASS}
+                                                    aria-expanded={!isRuleCollapsed}
+                                                    aria-label={isRuleCollapsed ? "Expand rule" : "Collapse rule"}
+                                                    onClick={() => toggleRulesEditorKey(`${RULE_COLLAPSED_KEY_PREFIX}${rule.id}`)}
+                                                    style={{ width: "28px", height: "28px", justifyContent: "center", fontSize: "0.75em", color: "#b5bac1" }}
+                                                >
+                                                    <span style={{ transform: isRuleCollapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s ease" }}>▼</span>
+                                                </button>
                                                 <input
                                                     style={{ ...inputStyle, fontFamily: "monospace", ...(regexError ? { borderColor: "#da373c" } : {}) }}
                                                     aria-label="Regex"
@@ -3394,6 +3414,10 @@ function ConfigPanel(props: any) {
                                             {regexError && (
                                                 <span id={regexErrorId} role="alert" style={{ color: "#f23f43", fontSize: "12px" }}>Invalid regex, this rule is skipped: {regexError}</span>
                                             )}
+                                            {isRuleCollapsed && (
+                                                <span style={{ color: "#b5bac1", fontSize: "12px", paddingLeft: "36px" }}>{ruleSummary}</span>
+                                            )}
+                                            {!isRuleCollapsed && (<>
                                             <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
                                                 {renderEnabledToggle("Rule", rule.enabled, () => updateRuleAtIndex(index, current => ({ ...current, enabled: !current.enabled })))}
                                                 <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
@@ -3431,6 +3455,7 @@ function ConfigPanel(props: any) {
                                                     {rule.actions.map((action, actionIndex) => renderRuleAction(index, rule.id, action, actionIndex))}
                                                 </div>
                                             )}
+                                            </>)}
                                         </div>
                                         );
                                     })}

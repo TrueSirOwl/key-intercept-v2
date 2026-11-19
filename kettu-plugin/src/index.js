@@ -2245,6 +2245,8 @@ function ConfigPanel(props) {
     const [isPetTypeDropdownOpen, setIsPetTypeDropdownOpen] = useState(false);
     // Which rule action chooser is expanded: "<rule id>-<action index>:entity" or ":op".
     const [openActionPicker, setOpenActionPicker] = useState(null);
+    // Rule ids whose details are hidden, so rules with many actions stay short.
+    const [collapsedRuleIds, setCollapsedRuleIds] = useState({});
     const [isRawJsonEditorOpen, setIsRawJsonEditorOpen] = useState(false);
     const [rawJsonInput, setRawJsonInput] = useState("");
     const [nowMs, setNowMs] = useState(() => Date.now());
@@ -3042,7 +3044,10 @@ function ConfigPanel(props) {
                             padding: 8
                         }
                     },
-                    h(Text, { style: { color: "#f2f3f5" } }, "Regex"),
+                    button(collapsedRuleIds[rule.id] ? "▶ Show details" : "▼ Hide details", () => {
+                        setCollapsedRuleIds(prev => ({ ...prev, [rule.id]: !prev[rule.id] }));
+                    }, { noTopMargin: true, key: `rule-collapse-${group.id}-${index}` }),
+                    h(Text, { style: { color: "#f2f3f5", marginTop: 6 } }, "Regex"),
                     h(TextInput, {
                         value: rule.rule_regex,
                         onChangeText: value => updateRuleAtIndex(index, current => ({ ...current, rule_regex: value })),
@@ -3058,6 +3063,12 @@ function ConfigPanel(props) {
                         autoCorrect: false,
                         style: inputStyle
                     }),
+                    // Collapsed: only regex and replacement stay, with a short summary of the rest.
+                    ...(collapsedRuleIds[rule.id] ? [h(Text, { key: `rule-summary-${group.id}-${index}`, style: { color: "#b5bac1", marginTop: 6 } }, [
+                        `${rule.actions.length} ${rule.actions.length === 1 ? "action" : "actions"}`,
+                        `${Math.round(rule.chance_to_apply * 100)}% chance`,
+                        ...(rule.enabled ? [] : ["disabled"])
+                    ].join(" · "))] : [
                     h(Text, { style: { color: "#b5bac1", marginTop: 6 } }, `Chance: ${Math.round(rule.chance_to_apply * 100)}%`),
                     h(TextInput, {
                         value: String(Math.round(rule.chance_to_apply * 100)),
@@ -3095,6 +3106,7 @@ function ConfigPanel(props) {
                         ...current,
                         actions: [...current.actions, createRuleAction(ruleActionFields[0])]
                     })), { key: `rule-add-action-${group.id}-${index}` })
+                    ])
                 ))
             );
         })
