@@ -33,6 +33,8 @@ for (const snippet of requiredSnippets) {
 }
 
 const forbiddenSnippets = [
+    // The panel refreshes every few seconds; resetting the relay field there undid typing in it.
+    "setRelayUrl(nextRelayUrl)",
     "openStateCandidates.find(",
     "React.useState(",
     "React.useEffect(",

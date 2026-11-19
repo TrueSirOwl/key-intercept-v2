@@ -53,6 +53,9 @@ pub struct RuleAction {
     /// Whether the change waits until the message is done; unset means the plugins' default for the target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_message: Option<bool>,
+    /// Ceiling of an increase or floor of a decrease, in the value's units; unset means no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +311,10 @@ mod tests {
         .unwrap();
         assert_eq!(timed.actions[0].after_message, Some(false));
         assert_eq!(timed.actions[1].after_message, None);
+        assert_eq!(timed.actions[1].limit, None);
+        let limited: super::RuleAction =
+            serde_json::from_str(r#"{"target": "pet.amount", "op": "increase", "value": 0.1, "limit": 0.6}"#).unwrap();
+        assert_eq!(limited.limit, Some(0.6));
         let saved = serde_json::to_value(&timed).unwrap();
         assert!(saved["actions"][1].get("after_message").is_none(), "an unset choice isn't written");
 

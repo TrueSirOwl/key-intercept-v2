@@ -11,6 +11,7 @@ const MOBILE_STATE_KEY = "key-intercept/mobile-loopback-state/v1";
 const PANEL_COLLAPSED_KEY = "panel";
 const SECTION_COLLAPSED_KEY_PREFIX = "section/";
 const RULE_GROUP_COLLAPSED_KEY_PREFIX = "ruleGroup/";
+const RULE_COLLAPSED_KEY_PREFIX = "rule/";
 const DEVELOPER_MODE_ENABLED = (() => {
     const values: unknown[] = [];
     try {
@@ -73,6 +74,8 @@ type RuleAction = {
     value: number | string | null;
     // Unset: the default for the target (see triggersAfterMessage).
     after_message?: boolean;
+    // increase: the ceiling, decrease: the floor (same units as the value). Unset: no limit.
+    limit?: number;
 };
 
 type RuleGroup = {
@@ -305,7 +308,8 @@ function mergeRuleActions(raw: unknown): RuleAction[] {
             target: action.target as string,
             op: action.op as string,
             value: typeof action.value === "number" || typeof action.value === "string" ? action.value : null,
-            ...(typeof action.after_message === "boolean" ? { after_message: action.after_message } : {})
+            ...(typeof action.after_message === "boolean" ? { after_message: action.after_message } : {}),
+            ...(typeof action.limit === "number" && Number.isFinite(action.limit) ? { limit: action.limit } : {})
         }));
 }
 
@@ -1296,7 +1300,14 @@ function applyRuleAction(config: LocalConfig, action: RuleAction, nowMs: number)
             if (typeof value !== "number" || !Number.isFinite(value)) break;
             const raw = op === "increase" ? current + value : op === "decrease" ? current - value : op === "set" ? value : NaN;
             if (Number.isNaN(raw)) break;
-            const clamped = Math.min(field.max ?? Infinity, Math.max(field.min ?? -Infinity, raw));
+            // An increase stops at its ceiling and a decrease at its floor; a value already past the
+            // limit is left as it is rather than pulled back to it.
+            let limited = raw;
+            if (typeof action.limit === "number") {
+                if (op === "increase") limited = current >= action.limit ? current : Math.min(raw, action.limit);
+                if (op === "decrease") limited = current <= action.limit ? current : Math.max(raw, action.limit);
+            }
+            const clamped = Math.min(field.max ?? Infinity, Math.max(field.min ?? -Infinity, limited));
             next = field.kind === "percent" ? Math.round(clamped * 100) / 100 : Math.round(clamped);
             break;
         }
@@ -2231,7 +2242,7 @@ function ConfigPanel(props: any) {
     const [nowMs, setNowMs] = React.useState(() => Date.now());
     const [canViewRemote, setCanViewRemote] = React.useState(isOwnProfile);
     const [isPanelCollapsed, togglePanelCollapsed] = usePersistedCollapsed(PANEL_COLLAPSED_KEY, profileUserId);
-    const [isRuleGroupKeyCollapsed, toggleRuleGroupKey] = usePersistedCollapsedKeys(profileUserId);
+    const [isRulesEditorKeyCollapsed, toggleRulesEditorKey] = usePersistedCollapsedKeys(profileUserId);
     const skipAutosaveRef = React.useRef(true);
     const lastSavedSnapshotRef = React.useRef("");
     const saveQueueRef = React.useRef(Promise.resolve());
@@ -2763,7 +2774,7 @@ function ConfigPanel(props: any) {
     // whole animation (a pinned header would otherwise be carried off-screen when its group shrinks),
     // so the cursor stays over the toggle.
     const toggleRuleGroupCollapsed = (groupId: number, trigger: HTMLElement) => {
-        toggleRuleGroupKey(`${RULE_GROUP_COLLAPSED_KEY_PREFIX}${groupId}`);
+        toggleRulesEditorKey(`${RULE_GROUP_COLLAPSED_KEY_PREFIX}${groupId}`);
         const header = trigger.closest(`.${GROUP_HEADER_CLASS}`);
         const scroller = rulesEditorScrollRef.current;
         if (!header || !scroller) return;
@@ -2828,7 +2839,8 @@ function ConfigPanel(props: any) {
         );
     };
     // Shared by the per-group column headings and each rule row so they line up.
-    const ruleColumnsStyle: React.CSSProperties = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 1em minmax(0, 1fr)", gap: "8px" };
+    // First column: the rule's collapse toggle.
+    const ruleColumnsStyle: React.CSSProperties = { display: "grid", gridTemplateColumns: "28px minmax(0, 1fr) 1em minmax(0, 1fr)", gap: "8px" };
 
     // Rule actions: pick what to change (a mode, setting, group or rule), then the change, then its value.
     const ruleActionFields = listRuleActionFields(editableConfig);
@@ -2882,6 +2894,35 @@ function ConfigPanel(props: any) {
                 return <input aria-label={field.label} style={{ ...compactInputStyle, flex: "1 1 140px" }} value={String(value ?? "")} onChange={e => setAction({ ...action, value: e.currentTarget.value })} />;
         }
     };
+    // The optional ceiling of an increase or floor of a decrease; empty means no limit.
+    const renderRuleActionLimit = (field: RuleActionField, action: RuleAction, setAction: (next: RuleAction) => void) => {
+        if (action.op !== "increase" && action.op !== "decrease") return null;
+        const isPercent = field.kind === "percent";
+        const shown = action.limit === undefined ? "" : String(isPercent ? Math.round(action.limit * 100) : action.limit);
+        const range = isPercent ? { min: 0, max: 100 } : { min: field.min, max: field.max };
+        return (
+            <label style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                {action.op === "increase" ? "but not above" : "but not below"}
+                <input
+                    aria-label={action.op === "increase" ? "Ceiling" : "Floor"}
+                    type="number"
+                    step={1}
+                    min={range.min}
+                    max={range.max}
+                    placeholder="no limit"
+                    style={{ ...compactInputStyle, width: "80px" }}
+                    value={shown}
+                    onChange={e => {
+                        const { limit: _previous, ...withoutLimit } = action;
+                        const text = e.currentTarget.value.trim();
+                        if (!text || !Number.isFinite(Number(text))) return setAction(withoutLimit);
+                        const entered = parseNumericInput(text, 0, range);
+                        setAction({ ...withoutLimit, limit: isPercent ? entered / 100 : Math.round(entered) });
+                    }}
+                />{isPercent && "%"}
+            </label>
+        );
+    };
     const renderRuleAction = (ruleIndex: number, ruleId: number, action: RuleAction, actionIndex: number) => {
         const field = ruleActionFields.find(candidate => candidate.target === action.target);
         const setAction = (next: RuleAction) => updateRuleAtIndex(ruleIndex, current => ({
@@ -2921,7 +2962,9 @@ function ConfigPanel(props: any) {
                         const choice = choices.find(candidate => `${candidate.field.target} ${candidate.op}` === e.currentTarget.value);
                         if (!choice) return;
                         const keepValue = choice.field.kind === field.kind && takesValue && ruleActionTakesValue(choice.field.kind, choice.op);
-                        setAction(keepValue ? { ...action, target: choice.field.target, op: choice.op } : keepTiming(createRuleAction(choice.field, choice.op)));
+                        // A limit belongs to one field and direction, so a new change starts without one.
+                        const { limit: _limit, ...withoutLimit } = action;
+                        setAction(keepValue ? { ...withoutLimit, target: choice.field.target, op: choice.op } : keepTiming(createRuleAction(choice.field, choice.op)));
                     }}>
                         {choices.map(choice => (
                             <option key={`${choice.field.target} ${choice.op}`} value={`${choice.field.target} ${choice.op}`}>{choice.label}</option>
@@ -2929,6 +2972,7 @@ function ConfigPanel(props: any) {
                     </select>
                 )}
                 {field && takesValue && renderRuleActionValue(field, action, setAction, durationInvalid)}
+                {field && takesValue && (field.kind === "percent" || field.kind === "number") && renderRuleActionLimit(field, action, setAction)}
                 {field && (
                     <button style={smallButtonStyle} aria-pressed={after} title="Before: the change already applies to the message that triggered it. After: it starts with the next message." onClick={() => setAction({ ...action, after_message: !after })}>
                         {after ? "Trigger after the message" : "Trigger before the message"}
@@ -3214,7 +3258,7 @@ function ConfigPanel(props: any) {
                                 .map((rule, index) => ({ rule, index }))
                                 .filter(item => item.rule.group_id === group.id)
                                 .sort((a, b) => a.rule.order - b.rule.order);
-                            const isGroupCollapsed = isRuleGroupKeyCollapsed(`${RULE_GROUP_COLLAPSED_KEY_PREFIX}${group.id}`);
+                            const isGroupCollapsed = isRulesEditorKeyCollapsed(`${RULE_GROUP_COLLAPSED_KEY_PREFIX}${group.id}`);
                             const isGroupAdvancedOpen = advancedRuleGroups[group.id] ?? false;
 
                             return (
@@ -3306,6 +3350,7 @@ function ConfigPanel(props: any) {
                                         <div className={RULES_COLLAPSE_CLASS} data-collapsed={isGroupCollapsed} aria-hidden="true">
                                             <div>
                                                 <div style={{ ...ruleColumnsStyle, padding: "8px 9px 0", color: "#b5bac1", fontWeight: 600 }}>
+                                                    <span />
                                                     <span>Regex</span>
                                                     <span />
                                                     <span>Replacement</span>
@@ -3325,6 +3370,13 @@ function ConfigPanel(props: any) {
                                         const ruleKey = ruleKeys[index];
                                         const regexError = getRuleRegexError(rule.rule_regex);
                                         const regexErrorId = `key-intercept-rule-${ruleKey}-regex-error`;
+                                        // Collapsed: only regex -> replacement stays, with a short summary of the rest.
+                                        const isRuleCollapsed = isRulesEditorKeyCollapsed(`${RULE_COLLAPSED_KEY_PREFIX}${rule.id}`);
+                                        const ruleSummary = [
+                                            `${rule.actions.length} ${rule.actions.length === 1 ? "action" : "actions"}`,
+                                            `${Math.round(rule.chance_to_apply * 100)}% chance`,
+                                            ...(rule.enabled ? [] : ["disabled"])
+                                        ].join(" · ");
                                         return (
                                         <div
                                             key={ruleKey}
@@ -3332,6 +3384,16 @@ function ConfigPanel(props: any) {
                                             style={{ background: RULE_BG, border: "1px solid #3f4147", borderRadius: "8px", padding: "8px", display: "grid", gap: "6px", opacity: rule.enabled ? 1 : 0.6, ...reorderDragStyle(`r-${ruleKey}`) }}
                                         >
                                             <div style={{ ...ruleColumnsStyle, alignItems: "center" }}>
+                                                <button
+                                                    type="button"
+                                                    className={COLLAPSE_TOGGLE_CLASS}
+                                                    aria-expanded={!isRuleCollapsed}
+                                                    aria-label={isRuleCollapsed ? "Expand rule" : "Collapse rule"}
+                                                    onClick={() => toggleRulesEditorKey(`${RULE_COLLAPSED_KEY_PREFIX}${rule.id}`)}
+                                                    style={{ width: "28px", height: "28px", justifyContent: "center", fontSize: "0.75em", color: "#b5bac1" }}
+                                                >
+                                                    <span style={{ transform: isRuleCollapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s ease" }}>▼</span>
+                                                </button>
                                                 <input
                                                     style={{ ...inputStyle, fontFamily: "monospace", ...(regexError ? { borderColor: "#da373c" } : {}) }}
                                                     aria-label="Regex"
@@ -3352,6 +3414,10 @@ function ConfigPanel(props: any) {
                                             {regexError && (
                                                 <span id={regexErrorId} role="alert" style={{ color: "#f23f43", fontSize: "12px" }}>Invalid regex, this rule is skipped: {regexError}</span>
                                             )}
+                                            {isRuleCollapsed && (
+                                                <span style={{ color: "#b5bac1", fontSize: "12px", paddingLeft: "36px" }}>{ruleSummary}</span>
+                                            )}
+                                            {!isRuleCollapsed && (<>
                                             <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
                                                 {renderEnabledToggle("Rule", rule.enabled, () => updateRuleAtIndex(index, current => ({ ...current, enabled: !current.enabled })))}
                                                 <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
@@ -3389,6 +3455,7 @@ function ConfigPanel(props: any) {
                                                     {rule.actions.map((action, actionIndex) => renderRuleAction(index, rule.id, action, actionIndex))}
                                                 </div>
                                             )}
+                                            </>)}
                                         </div>
                                         );
                                     })}
