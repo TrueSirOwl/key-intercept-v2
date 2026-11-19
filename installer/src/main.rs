@@ -502,6 +502,7 @@ fn install_plugin_into_vencord(
     let plugin_dir =
         install_vencord_userplugin(source, &vencord_dir, plugin_folder, plugin_file_name)?;
     write_plugin_native_csp(&plugin_dir, relay_server_url)?;
+    write_plugin_default_relay(&plugin_dir, plugin_file_name, relay_server_url)?;
     install_plugin_dependencies(source, &plugin_dir)?;
     run_sandboxed_pnpm_in_dir(installer_tools, &pnpm_install_args(), &vencord_dir)?;
     run_sandboxed_pnpm_in_dir(installer_tools, &["build"], &vencord_dir)?;
@@ -525,7 +526,7 @@ fn write_plugin_native_csp(plugin_dir: &Path, relay_server_url: Option<&str>) ->
         return Ok(());
     };
 
-    let relay_origin = relay_origin_for_csp(relay_url)?;
+    let relay_origin = relay_host_for_csp(relay_url)?;
     let native_path = plugin_dir.join("native.ts");
     fs::write(&native_path, build_plugin_native_source(&relay_origin)?)
         .with_context(|| format!("failed to write {}", native_path.display()))?;
@@ -593,10 +594,41 @@ fn plugin_manifest_has_dependencies(manifest_source: &str) -> Result<bool> {
         .is_some_and(|deps| !deps.is_empty()))
 }
 
-fn relay_origin_for_csp(relay_server_url: &str) -> Result<String> {
+/// The relay's host (and port, if any): Vencord keys `CspPolicies` by host, and that is also what
+/// `VencordNative.csp.isDomainAllowed` looks up, so the plugin knows the installer's relay is allowed.
+fn relay_host_for_csp(relay_server_url: &str) -> Result<String> {
     let parsed = reqwest::Url::parse(relay_server_url)
         .with_context(|| format!("invalid --relay-server-url: {relay_server_url}"))?;
-    Ok(parsed.origin().ascii_serialization())
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("--relay-server-url has no host: {relay_server_url}"))?;
+    Ok(match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
+}
+
+/// Stands in the plugin source for the relay chosen during install; it becomes the default of the
+/// plugin's "Public relay URL" setting, which decides the relay this machine uses from then on.
+const PLUGIN_RELAY_URL_PLACEHOLDER: &str = "\"__KEY_INTERCEPT_INSTALLER_RELAY_URL__\"";
+
+fn write_plugin_default_relay(
+    plugin_dir: &Path,
+    plugin_file_name: &str,
+    relay_server_url: Option<&str>,
+) -> Result<()> {
+    let Some(relay_url) = relay_server_url.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let entry = plugin_dir.join(plugin_entry_file_name(plugin_file_name)?);
+    let source = fs::read_to_string(&entry)
+        .with_context(|| format!("failed to read {}", entry.display()))?;
+    if !source.contains(PLUGIN_RELAY_URL_PLACEHOLDER) {
+        return Ok(());
+    }
+    let relay_literal = serde_json::to_string(relay_url).context("failed to encode relay URL")?;
+    fs::write(&entry, source.replacen(PLUGIN_RELAY_URL_PLACEHOLDER, &relay_literal, 1))
+        .with_context(|| format!("failed to write {}", entry.display()))
 }
 
 fn pnpm_install_args() -> [&'static str; 2] {
@@ -1790,9 +1822,26 @@ mod tests {
     }
 
     #[test]
-    fn relay_origin_for_csp_uses_url_origin_with_scheme() {
-        let origin = relay_origin_for_csp("https://kirelay.thomaslower.com").unwrap();
-        assert_eq!(origin, "https://kirelay.thomaslower.com");
+    fn relay_host_for_csp_is_the_host_and_port() {
+        assert_eq!(relay_host_for_csp("https://kirelay.thomaslower.com").unwrap(), "kirelay.thomaslower.com");
+        assert_eq!(relay_host_for_csp("https://example.org/ki-relay").unwrap(), "example.org");
+        assert_eq!(relay_host_for_csp("https://example.org:8443/x").unwrap(), "example.org:8443");
+    }
+
+    #[test]
+    fn write_plugin_default_relay_fills_the_placeholder() {
+        let plugin_dir = tempdir().unwrap();
+        let entry = plugin_dir.path().join("index.tsx");
+        std::fs::write(&entry, "const INSTALLER_RELAY_URL = \"__KEY_INTERCEPT_INSTALLER_RELAY_URL__\";").unwrap();
+        write_plugin_default_relay(plugin_dir.path(), "plugin.tsx", Some(" https://example.org/ki-relay ")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&entry).unwrap(),
+            "const INSTALLER_RELAY_URL = \"https://example.org/ki-relay\";"
+        );
+
+        std::fs::write(&entry, "no placeholder").unwrap();
+        write_plugin_default_relay(plugin_dir.path(), "plugin.tsx", Some("https://example.org")).unwrap();
+        assert_eq!(std::fs::read_to_string(&entry).unwrap(), "no placeholder");
     }
 
     #[test]
@@ -1832,7 +1881,7 @@ mod tests {
 
         let native = std::fs::read_to_string(plugin_dir.path().join("native.ts")).unwrap();
         assert!(native.contains("import { ConnectSrc, CspPolicies } from \"@main/csp\";"));
-        assert!(native.contains("CspPolicies[\"https://kirelay.thomaslower.com\"] = ConnectSrc;"));
+        assert!(native.contains("CspPolicies[\"kirelay.thomaslower.com\"] = ConnectSrc;"));
     }
 
     #[test]

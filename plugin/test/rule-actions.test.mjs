@@ -35,7 +35,7 @@ const harness = new Function(`
     async function saveLocalConfig(userId, config) { stored = config; interceptConfig = mergeLocalConfig(config); return interceptConfig; }
     ${body}
     return {
-        mergeLocalConfig, applyRuleAction, applyRules, withoutDanglingRuleActions, parseDuration,
+        mergeLocalConfig, applyRuleAction, applyRules, applyHeldRuleActions, withoutDanglingRuleActions, parseDuration,
         load(config) { stored = config; interceptConfig = mergeLocalConfig(config); },
         get config() { return interceptConfig; },
         get stored() { return stored; },
@@ -110,6 +110,8 @@ assert.equal(harness.parseDuration("5 minutes"), null);
     assert.deepEqual(run("censored.words", "add", "bad").censored_words, ["Bad"], "no duplicate words, ignoring case");
     assert.deepEqual(run("censored.words", "remove", "BAD").censored_words, []);
     assert.equal(run("debug.enabled", "enable", null).config.debug, true);
+    assert.equal(base.config.debug_message, "(original message: {original})", "configs without a debug message get the default");
+    assert.equal(run("debug.message", "set", "(was: {original})").config.debug_message, "(was: {original})");
 
     assert.equal(run("group.2.enabled", "enable", null).rules_groups[0].enabled, true);
     assert.equal(run("group.2.timer", "add", "10m").rules_groups[0].timeout_end, iso(now + 600_000));
@@ -123,7 +125,8 @@ assert.equal(harness.parseDuration("5 minutes"), null);
     assert.deepEqual(harness.withoutDanglingRuleActions(withDangling).rules[0].actions.map(action => action.target), ["group.2.enabled"]);
 }
 
-// Sending: actions fire per replaced match, apply within the same message, and get saved.
+// Sending: actions fire per replaced match and get saved. Rule and group changes apply within the same
+// message; mode changes wait until the message is done.
 {
     harness.load({
         config: { gag_end: epoch },
@@ -151,6 +154,8 @@ assert.equal(harness.parseDuration("5 minutes"), null);
     const before = Date.now();
     const output = harness.applyRules("sorry hello sorry, once once never");
     assert.equal(output, "sorry HI sorry, ONCE once never", "a group enabled by an earlier rule applies to the same message; a rule that disables itself stops at once");
+    assert.equal(harness.config.config.gag_end, epoch, "the gag waits until the message that triggered it is done");
+    harness.applyHeldRuleActions();
     const gagEnd = Date.parse(harness.config.config.gag_end);
     assert.ok(gagEnd >= before + 600_000 && gagEnd <= Date.now() + 600_000, "each replaced match fires the actions: two matches add 10 minutes");
     assert.equal(harness.config.drone_config.drone_health, 100, "a match whose chance roll fails fires nothing");

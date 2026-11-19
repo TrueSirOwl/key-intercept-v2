@@ -7,12 +7,13 @@ use axum::{
         header::{CONTENT_TYPE, HeaderName},
     },
     response::IntoResponse,
-    routing::{delete, get},
+    routing::{delete, get, put},
 };
 use loopback_core::{ConfigStore, LocalConfig, is_discord_id};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use tokio::sync::watch;
 use tokio::time::{Duration, Instant, sleep};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
@@ -40,6 +41,22 @@ fn developer_default_relay_url() -> Option<String> {
 #[derive(Clone)]
 struct AppState {
     store: ConfigStore,
+    relay: RelaySetting,
+}
+
+/// The relay the bridge registers with. The Discord plugin sets it from its "Public relay URL"
+/// setting, so changing that setting is enough to move to another relay. It is saved in a file
+/// next to the config and wins over RELAY_SERVER_URL (the installer's choice) after a restart.
+#[derive(Clone)]
+struct RelaySetting {
+    url: Arc<watch::Sender<Option<String>>>,
+    file: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayPayload {
+    relay_url: String,
 }
 
 #[derive(Serialize)]
@@ -151,7 +168,7 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(35491);
-    let relay_server_url = std::env::var("RELAY_SERVER_URL")
+    let env_relay_server_url = std::env::var("RELAY_SERVER_URL")
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
@@ -166,19 +183,26 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| default_config_path());
     info!("using config path {}", config_path.display());
 
+    let relay_file = relay_setting_path(&config_path);
+    let saved_relay_server_url = tokio::fs::read_to_string(&relay_file)
+        .await
+        .ok()
+        .and_then(|saved| normalize_relay_url(&saved));
+    let (relay_url, relay_url_changes) =
+        watch::channel(saved_relay_server_url.or(env_relay_server_url));
+    let relay = RelaySetting {
+        url: Arc::new(relay_url),
+        file: relay_file,
+    };
+
     let store = ConfigStore::load_or_create(config_path, owner_discord_id.clone()).await?;
-    if let Some(relay_url) = relay_server_url {
-        info!("relay bridge enabled for {}", relay_url);
-        tokio::spawn(run_relay_bridge(
-            store.clone(),
-            owner_discord_id.clone(),
-            relay_url,
-            shared_token,
-            port,
-        ));
-    } else {
-        warn!("relay bridge disabled: RELAY_SERVER_URL is not set");
-    }
+    tokio::spawn(run_relay_bridge_supervisor(
+        store.clone(),
+        owner_discord_id.clone(),
+        relay_url_changes,
+        shared_token,
+        port,
+    ));
 
     let app = Router::new()
         .route("/health", get(health))
@@ -190,7 +214,8 @@ async fn main() -> Result<()> {
             get(get_allowed_editors).post(add_allowed_editor),
         )
         .route("/allowed-editors/:editor_id", delete(remove_allowed_editor))
-        .with_state(AppState { store })
+        .route("/relay", put(put_relay))
+        .with_state(AppState { store, relay })
         .layer(discord_cors_layer());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -210,6 +235,54 @@ fn default_config_path() -> PathBuf {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+fn relay_setting_path(config_path: &std::path::Path) -> PathBuf {
+    config_path.with_file_name("relay-url.txt")
+}
+
+/// The URL trimmed and without a trailing slash, or None unless it is an http(s) URL with a host.
+fn normalize_relay_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let parsed = reqwest::Url::parse(trimmed).ok()?;
+    (matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some())
+        .then(|| trimmed.to_string())
+}
+
+/// Lets the owner's Discord plugin move this machine to another relay.
+async fn put_relay(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<RelayPayload>,
+) -> impl IntoResponse {
+    let error = |status: StatusCode, message: &str| {
+        (
+            status,
+            Json(ErrorResponse {
+                error: message.to_string(),
+            }),
+        )
+            .into_response()
+    };
+    let Some(requester_id) = requester_header(&headers) else {
+        return error(StatusCode::UNAUTHORIZED, "missing x-discord-user-id header");
+    };
+    if requester_id != state.store.get().await.owner_discord_id {
+        return error(StatusCode::FORBIDDEN, "only the owner can change the relay");
+    }
+    let Some(relay_url) = normalize_relay_url(&payload.relay_url) else {
+        return error(StatusCode::BAD_REQUEST, "relay_url must be an http(s) URL");
+    };
+    if state.relay.url.borrow().as_deref() == Some(relay_url.as_str()) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    if let Err(err) = tokio::fs::write(&state.relay.file, format!("{relay_url}\n")).await {
+        error!("saving relay URL to {} failed: {}", state.relay.file.display(), err);
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to save relay URL");
+    }
+    info!("relay changed to {} by the plugin", relay_url);
+    state.relay.url.send_replace(Some(relay_url));
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn owner(State(state): State<AppState>) -> impl IntoResponse {
@@ -462,6 +535,36 @@ fn discord_cors_layer() -> CorsLayer {
             Method::OPTIONS,
         ])
         .allow_headers([CONTENT_TYPE, HeaderName::from_static("x-discord-user-id")])
+}
+
+/// Runs the relay bridge for the current relay URL and starts it over on the new relay whenever
+/// the URL changes.
+async fn run_relay_bridge_supervisor(
+    store: ConfigStore,
+    owner_discord_id: String,
+    mut relay_url: watch::Receiver<Option<String>>,
+    shared_token: Option<String>,
+    loopback_port: u16,
+) {
+    loop {
+        let current = relay_url.borrow_and_update().clone();
+        let Some(url) = current else {
+            warn!("relay bridge disabled: no relay URL set");
+            if relay_url.changed().await.is_err() {
+                return;
+            }
+            continue;
+        };
+        info!("relay bridge enabled for {}", url);
+        tokio::select! {
+            _ = run_relay_bridge(store.clone(), owner_discord_id.clone(), url, shared_token.clone(), loopback_port) => {}
+            changed = relay_url.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 async fn run_relay_bridge(
@@ -764,5 +867,68 @@ async fn execute_desktop_command(
                 None,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+    use tempfile::tempdir;
+
+    #[test]
+    fn normalize_relay_url_accepts_http_urls_only() {
+        assert_eq!(
+            normalize_relay_url(" https://example.org/ki-relay/ ").as_deref(),
+            Some("https://example.org/ki-relay")
+        );
+        assert_eq!(
+            normalize_relay_url("http://127.0.0.1:46001").as_deref(),
+            Some("http://127.0.0.1:46001")
+        );
+        assert_eq!(normalize_relay_url("example.org"), None);
+        assert_eq!(normalize_relay_url("file:///etc/passwd"), None);
+        assert_eq!(normalize_relay_url(""), None);
+    }
+
+    #[tokio::test]
+    async fn put_relay_lets_only_the_owner_switch_and_saves_the_choice() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let store = ConfigStore::load_or_create(config_path.clone(), "1".to_string())
+            .await
+            .unwrap();
+        let (sender, mut changes) = watch::channel(Some("https://old.example".to_string()));
+        changes.borrow_and_update();
+        let state = AppState {
+            store,
+            relay: RelaySetting {
+                url: Arc::new(sender),
+                file: relay_setting_path(&config_path),
+            },
+        };
+        let put = |requester: Option<&str>, url: &str| {
+            let mut headers = HeaderMap::new();
+            if let Some(requester) = requester {
+                headers.insert("x-discord-user-id", HeaderValue::from_str(requester).unwrap());
+            }
+            let payload = RelayPayload { relay_url: url.to_string() };
+            let state = state.clone();
+            async move { put_relay(State(state), headers, Json(payload)).await.into_response().status() }
+        };
+
+        assert_eq!(put(None, "https://new.example").await, StatusCode::UNAUTHORIZED);
+        assert_eq!(put(Some("2"), "https://new.example").await, StatusCode::FORBIDDEN);
+        assert_eq!(put(Some("1"), "not a url").await, StatusCode::BAD_REQUEST);
+        assert!(!changes.has_changed().unwrap(), "rejected requests change nothing");
+
+        assert_eq!(put(Some("1"), "https://new.example/ki-relay/").await, StatusCode::NO_CONTENT);
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(changes.borrow_and_update().as_deref(), Some("https://new.example/ki-relay"));
+        let saved = std::fs::read_to_string(dir.path().join("relay-url.txt")).unwrap();
+        assert_eq!(normalize_relay_url(&saved).as_deref(), Some("https://new.example/ki-relay"));
+
+        assert_eq!(put(Some("1"), "https://new.example/ki-relay").await, StatusCode::NO_CONTENT);
+        assert!(!changes.has_changed().unwrap(), "the same relay again doesn't restart the bridge");
     }
 }

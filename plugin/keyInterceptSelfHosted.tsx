@@ -29,7 +29,11 @@ const DEVELOPER_MODE_ENABLED = (() => {
     }
     return false;
 })();
-const DEFAULT_RELAY_URL = DEVELOPER_MODE_ENABLED ? "http://127.0.0.1:46001" : "https://kirelay.thomaslower.com";
+// The installer puts the relay chosen during install here, making it the default of the relay setting.
+const INSTALLER_RELAY_URL = "__KEY_INTERCEPT_INSTALLER_RELAY_URL__";
+const DEFAULT_RELAY_URL = /^https?:\/\//.test(INSTALLER_RELAY_URL)
+    ? INSTALLER_RELAY_URL
+    : DEVELOPER_MODE_ENABLED ? "http://127.0.0.1:46001" : "https://kirelay.thomaslower.com";
 
 type Config = {
     rules_end: string;
@@ -45,6 +49,7 @@ type Config = {
     censored_end: string;
     censored_replacement: string;
     debug: boolean;
+    debug_message: string;
     blocked_by_dom: boolean;
 };
 
@@ -184,6 +189,9 @@ const petWordsByType: Record<number, string[]> = {
     7: ["squeak", "pyon"]
 };
 
+// Added below a message in debug mode; {original} stands for the message before changes.
+const DEFAULT_DEBUG_MESSAGE = "(original message: {original})";
+
 const defaultLocalConfig: LocalConfig = {
     config: {
         rules_end: farFuture,
@@ -199,6 +207,7 @@ const defaultLocalConfig: LocalConfig = {
         censored_end: epoch,
         censored_replacement: "*",
         debug: false,
+        debug_message: DEFAULT_DEBUG_MESSAGE,
         blocked_by_dom: false
     },
     rules: [],
@@ -354,6 +363,7 @@ function mergeLocalConfig(raw: unknown): LocalConfig {
     } as Config;
     // The loopback rejects an empty replacement (400); fall back while the field is being cleared/retyped.
     if (!mergedConfig.censored_replacement) mergedConfig.censored_replacement = defaultLocalConfig.config.censored_replacement;
+    if (typeof mergedConfig.debug_message !== "string") mergedConfig.debug_message = DEFAULT_DEBUG_MESSAGE;
 
     return {
         config: mergedConfig,
@@ -723,6 +733,48 @@ function relayBaseUrl(relayUrl: string): string {
     } catch {
         return trimmed.replace(/\/$/, "");
     }
+}
+
+// The relay setting is all it takes to move to another relay: Discord is asked to allow connections
+// to it (Vencord shows a confirmation, then Discord needs a restart), and the loopback is told to
+// register there, so others reach this user's config through the same relay.
+async function applyRelaySetting(relayUrl: string) {
+    const url = relayBaseUrl(relayUrl);
+    let parsed: URL;
+    try {
+        parsed = new URL(url);
+    } catch {
+        return;
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
+
+    const csp = VencordNative?.csp;
+    if (csp && !isLoopbackHostname(parsed.hostname) && !await csp.isDomainAllowed(url, ["connect-src"])) {
+        const result = await csp.requestAddOverride(url, ["connect-src"], "Key Intercept");
+        console.info(`${LOG_PREFIX} relay permission for ${parsed.host}: ${result}`);
+    }
+
+    if (activeLoopbackTransport !== "desktop_http") return;
+    const response = await fetch(`${LOOPBACK}/relay`, {
+        method: "PUT",
+        headers: {
+            "content-type": "application/json",
+            "x-discord-user-id": currentUser().id
+        },
+        body: JSON.stringify({ relay_url: url })
+    });
+    if (!response.ok) throw new Error(`Failed switching the loopback to ${url}: ${response.status}`);
+}
+
+let relaySettingTimer: ReturnType<typeof setTimeout> | undefined;
+
+// The setting changes on every keystroke; act once typing has paused.
+function scheduleApplyRelaySetting() {
+    clearTimeout(relaySettingTimer);
+    relaySettingTimer = setTimeout(() => {
+        applyRelaySetting(settings.store.relayUrl)
+            .catch(err => console.warn(`${LOG_PREFIX} applying the relay setting failed`, err));
+    }, 1500);
 }
 
 async function pushRemoteConfig(
@@ -1181,6 +1233,7 @@ function listRuleActionFields(config: LocalConfig): RuleActionField[] {
         c => c.censored_words,
         (c, value) => ({ ...c, censored_words: value }));
     add("debug", "Debug mode", "enabled", "debug mode", "switch", ...configField("debug"));
+    add("debug", "Debug mode", "message", "debug message", "text", ...configField("debug_message"));
 
     const groups = [...config.rules_groups].sort((a, b) => a.order - b.order);
     const groupLabel = (group: RuleGroup) => group.name || `Group ${group.id}`;
@@ -1302,11 +1355,32 @@ function applyFiredRuleActions(config: LocalConfig, fired: FiredRuleAction[]): L
 let pendingRuleActions: FiredRuleAction[] = [];
 let ruleActionSaveQueue = Promise.resolve();
 
-// Takes effect at once, so later rules and modes in the same message already see the change.
+// Changes to rules and groups take effect at once, so a rule can switch itself off after one match
+// or switch on a later group for the same message. Everything else (modes and their settings) is
+// held until the message is done, so a "gag me" rule doesn't gag the message that triggered it.
+let heldRuleActions: FiredRuleAction[] = [];
+
+function changesRules(action: RuleAction): boolean {
+    return action.target.startsWith("rule.") || action.target.startsWith("group.");
+}
+
 function fireRuleActions(actions: RuleAction[]) {
     if (!actions.length) return;
     const nowMs = Date.now();
     const fired = actions.map(action => ({ action, nowMs }));
+    heldRuleActions.push(...fired.filter(({ action }) => !changesRules(action)));
+    commitRuleActions(fired.filter(({ action }) => changesRules(action)));
+}
+
+// Called once the message is done.
+function applyHeldRuleActions() {
+    const held = heldRuleActions;
+    heldRuleActions = [];
+    commitRuleActions(held);
+}
+
+function commitRuleActions(fired: FiredRuleAction[]) {
+    if (!fired.length) return;
     interceptConfig = applyFiredRuleActions(interceptConfig, fired);
     pendingRuleActions.push(...fired);
     ruleActionSaveQueue = ruleActionSaveQueue
@@ -1827,6 +1901,14 @@ function applyDrone(msg: string, channelId: string): { message: string; editPrev
 }
 
 function applyReplacements(msg: string, channelId: string): string {
+    try {
+        return transformMessage(msg, channelId);
+    } finally {
+        applyHeldRuleActions();
+    }
+}
+
+function transformMessage(msg: string, channelId: string): string {
     if (!interceptConfig?.config) return msg;
 
     const originalMsg = msg;
@@ -1884,7 +1966,8 @@ function applyReplacements(msg: string, channelId: string): string {
     });
 
     if (interceptConfig.config.debug) {
-        return `${msg}\n(original message: ${originalMsg})`;
+        const note = interceptConfig.config.debug_message.split("{original}").join(originalMsg);
+        return note ? `${msg}\n${note}` : msg;
     }
 
     return msg;
@@ -3069,6 +3152,10 @@ function ConfigPanel(props: any) {
                                 />
                                 Debug mode
                             </label>
+                            <label>Debug message ({"{original}"} is the message before changes; empty adds nothing)<input style={inputStyle} value={editableConfig.config.debug_message} onChange={e => {
+                                const nextValue = e.currentTarget.value;
+                                setEditableConfig(prev => ({ ...prev, config: { ...prev.config, debug_message: nextValue } }));
+                            }} /></label>
                         </div>
                     </CollapsibleSection>
 
@@ -3445,8 +3532,9 @@ function ConfigPanel(props: any) {
 const settings = definePluginSettings({
     relayUrl: {
         type: OptionType.STRING,
-        description: "Public relay URL",
-        default: DEFAULT_RELAY_URL
+        description: "Public relay URL. Changing it moves this machine to that relay; Discord asks to allow it, then needs a restart.",
+        default: DEFAULT_RELAY_URL,
+        onChange: scheduleApplyRelaySetting
     },
     loopbackTransportMode: {
         type: OptionType.STRING,
@@ -3478,9 +3566,13 @@ const plugin = definePlugin({
         } catch (err) {
             console.error("key-intercept failed to load local config", err);
         }
+        // Not awaited: the permission dialog waits for the user.
+        applyRelaySetting(settings.store.relayUrl)
+            .catch(err => console.warn(`${LOG_PREFIX} applying the relay setting failed`, err));
     },
     stop() {
         stopDesktopConfigBackgroundSync();
+        clearTimeout(relaySettingTimer);
     },
     onBeforeMessageSend(channelId: string, msg: { content: string }) {
         const channel = ChannelStore?.getChannel?.(channelId);

@@ -213,9 +213,15 @@ A rule can also have **actions**: changes to the rest of the config that happen 
  - raise, lower or set the pet amount, a rule's chance, drone health or the bimbo word length
  - set the pet type, change text settings such as drone headers/footers or a rule's replacement, and add or remove censored words
 
-Durations are written like `30s`, `5m`, `1h 30m` or `2d`. Actions take effect straight away, so the rest of the same message already uses the change. To trigger an action without changing the matched text, use `$&` as the replacement. Sub Control and the whitelist can't be changed by actions.
+Durations are written like `30s`, `5m`, `1h 30m` or `2d`. Actions that change rules or groups take effect straight away, so a rule can switch itself off after one match or switch on another group for the rest of the same message. All other actions (modes and their settings) start with the next message, so a rule for "gag me" doesn't gag the message that triggered it. To trigger an action without changing the matched text, use `$&` as the replacement. Sub Control and the whitelist can't be changed by actions.
 
 Rule groups can also be set to disable after a period of time, the same as the pre-build modes.
+
+### Relay
+
+Configs travel between users through a relay server, and people can only reach each other's configs when they use the same relay. To switch relays on PC, change **Public relay URL** in the plugin's settings (Discord settings -> Vencord -> Plugins -> key-intercept). Discord asks whether to allow connections to the new relay; tick the box, click Allow, then fully restart Discord. The loopback moves to the new relay by itself. On mobile, set **Relay URL** in the plugin's config panel.
+
+To host your own relay, build `relay-server/Dockerfile` (or deploy `relay-server/docker-compose.yml`, e.g. as a Portainer stack from this repository) and put it behind HTTPS with a valid certificate: Discord refuses plain `http` relays.
 
 ### Whitelist
 The whitelist allows you to specify which servers you want the plugin to run on. It will only run on the selected servers / DM's.

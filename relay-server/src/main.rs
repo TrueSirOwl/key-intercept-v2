@@ -1510,10 +1510,16 @@ fn discord_cors_layer() -> CorsLayer {
 }
 
 fn has_exact_keys(map: &serde_json::Map<String, Value>, expected: &[&str]) -> bool {
-    if map.len() != expected.len() {
-        return false;
-    }
-    expected.iter().all(|k| map.contains_key(*k))
+    has_keys(map, expected, &[])
+}
+
+/// All `required` keys, any of `optional`, nothing else. Fields added later are optional so
+/// configs from plugins that predate them still pass.
+fn has_keys(map: &serde_json::Map<String, Value>, required: &[&str], optional: &[&str]) -> bool {
+    required.iter().all(|k| map.contains_key(*k))
+        && map
+            .keys()
+            .all(|k| required.contains(&k.as_str()) || optional.contains(&k.as_str()))
 }
 
 fn validate_config_shape(value: &Value) -> Result<(), String> {
@@ -1555,7 +1561,7 @@ fn validate_config_shape(value: &Value) -> Result<(), String> {
         "debug",
         "blocked_by_dom",
     ];
-    if !has_exact_keys(config, &config_keys) {
+    if !has_keys(config, &config_keys, &["debug_message"]) {
         return Err("config.config has unexpected or missing fields".to_string());
     }
 
@@ -1655,6 +1661,16 @@ mod tests {
                 "drone_term": "Drone"
             }
         })
+    }
+
+    #[test]
+    fn config_shape_accepts_debug_message_but_no_other_extra_field() {
+        let mut config = sample_config();
+        assert!(validate_config_shape(&config).is_ok(), "configs without debug_message still pass");
+        config["config"]["debug_message"] = serde_json::json!("(was: {original})");
+        assert!(validate_config_shape(&config).is_ok());
+        config["config"]["surprise"] = serde_json::json!(true);
+        assert!(validate_config_shape(&config).is_err());
     }
 
     #[tokio::test]
