@@ -2272,8 +2272,9 @@ function ConfigPanel(props) {
         if (!isPanelOpen) return;
         if (refreshInFlightRef.current) return;
         refreshInFlightRef.current = true;
+        // Only Save writes the relay field to storage; this runs every few seconds, so it must not
+        // overwrite what is being typed into the field.
         const nextRelayUrl = currentRelayUrl();
-        setRelayUrl(nextRelayUrl);
         try {
             const requesterId = ownerProfileId;
             const ownOwnerId = isOwnProfile && validateDiscordId(effectiveOwnUserId) ? effectiveOwnUserId : requesterId;
@@ -2458,6 +2459,7 @@ function ConfigPanel(props) {
             return;
         }
         storage?.setItem(RELAY_URL_STORAGE_KEY, next);
+        setRelayUrl(next);
         setStatus("Saved relay URL");
     }, [relayUrl]);
 
