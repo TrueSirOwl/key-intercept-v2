@@ -210,7 +210,7 @@ There are other components to a rule such as the chance for it to activate, but 
 A rule can also have **actions**: changes to the rest of the config that happen each time the rule replaces a match. An action can:
  - add or remove time from a mode or rule group, make it permanent or turn it off
  - enable or disable rule groups, other rules, or the rule itself
- - raise, lower or set the pet amount, a rule's chance, drone health or the bimbo word length
+ - raise, lower or set the pet amount, a rule's chance, drone health or the bimbo word length; a raise can have a ceiling and a lowering a floor that it won't go past (a value already past it is left alone)
  - set the pet type, change text settings such as drone headers/footers or a rule's replacement, and add or remove censored words
 
 Durations are written like `30s`, `5m`, `1h 30m` or `2d`. Each action triggers either before the message, so it already changes the message that triggered it, or after it, so it starts with the next message. Switch between them with the action's **Trigger before/after the message** button. By default, actions that change rules or groups trigger before, so a rule can switch itself off after one match or switch on another group for the rest of the same message. All other actions (modes and their settings) trigger after, so a rule for "gag me" doesn't gag the message that triggered it. To trigger an action without changing the matched text, use `$&` as the replacement. Sub Control and the whitelist can't be changed by actions.

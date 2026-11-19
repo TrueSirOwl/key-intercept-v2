@@ -101,6 +101,13 @@ assert.equal(harness.parseDuration("5 minutes"), null);
     assert.equal(run("drone.health", "decrease", 30).drone_config.drone_health, 70);
     assert.equal(run("drone.health", "set", 150).drone_config.drone_health, 100, "health stays within 0..100");
     assert.equal(run("bimbo.word_length", "decrease", 50).config.bimbo_word_length, 1, "word length stays at least 1");
+    const limited = (target, op, value, limit) => harness.applyRuleAction(base, { target, op, value, limit }, now);
+    assert.equal(limited("pet.amount", "increase", 0.3, 0.6).config.pet_amount, 0.6, "an increase stops at its ceiling");
+    assert.equal(limited("pet.amount", "increase", 0.05, 0.6).config.pet_amount, 0.55, "below the ceiling it adds the full amount");
+    assert.equal(limited("pet.amount", "increase", 0.1, 0.4).config.pet_amount, 0.5, "a value already above the ceiling isn't lowered");
+    assert.equal(limited("drone.health", "decrease", 50, 70).drone_config.drone_health, 70, "a decrease stops at its floor");
+    assert.equal(limited("drone.health", "decrease", 10, 120).drone_config.drone_health, 100, "a value already below the floor isn't raised");
+    assert.equal(limited("drone.health", "set", 40, 70).drone_config.drone_health, 40, "setting a value ignores the limit");
     assert.equal(run("drone.speech_header", "set", "BEEP").drone_config.speech_header, "BEEP");
     assert.deepEqual(run("censored.words", "add", " cute ").censored_words, ["Bad", "cute"]);
     assert.deepEqual(run("censored.words", "add", "bad").censored_words, ["Bad"], "no duplicate words, ignoring case");
@@ -196,6 +203,16 @@ assert.equal(harness.parseDuration("5 minutes"), null);
         rules_groups: [{ id: 1 }]
     });
     assert.equal("after_message" in malformed.rules[0].actions[0], false, "a malformed choice is dropped, leaving the default");
+
+    const limits = harness.mergeLocalConfig({
+        rules: [{ id: 1, rule_regex: "a", group_id: 1, actions: [
+            { target: "pet.amount", op: "increase", value: 0.1, limit: 0.6 },
+            { target: "pet.amount", op: "increase", value: 0.1, limit: "0.6" }
+        ] }],
+        rules_groups: [{ id: 1 }]
+    }).rules[0].actions;
+    assert.equal(limits[0].limit, 0.6, "a limit survives loading");
+    assert.equal("limit" in limits[1], false, "a malformed limit is dropped");
 }
 
 console.log("rule actions test passed");

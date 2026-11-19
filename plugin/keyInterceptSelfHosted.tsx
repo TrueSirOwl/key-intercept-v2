@@ -73,6 +73,8 @@ type RuleAction = {
     value: number | string | null;
     // Unset: the default for the target (see triggersAfterMessage).
     after_message?: boolean;
+    // increase: the ceiling, decrease: the floor (same units as the value). Unset: no limit.
+    limit?: number;
 };
 
 type RuleGroup = {
@@ -305,7 +307,8 @@ function mergeRuleActions(raw: unknown): RuleAction[] {
             target: action.target as string,
             op: action.op as string,
             value: typeof action.value === "number" || typeof action.value === "string" ? action.value : null,
-            ...(typeof action.after_message === "boolean" ? { after_message: action.after_message } : {})
+            ...(typeof action.after_message === "boolean" ? { after_message: action.after_message } : {}),
+            ...(typeof action.limit === "number" && Number.isFinite(action.limit) ? { limit: action.limit } : {})
         }));
 }
 
@@ -1296,7 +1299,14 @@ function applyRuleAction(config: LocalConfig, action: RuleAction, nowMs: number)
             if (typeof value !== "number" || !Number.isFinite(value)) break;
             const raw = op === "increase" ? current + value : op === "decrease" ? current - value : op === "set" ? value : NaN;
             if (Number.isNaN(raw)) break;
-            const clamped = Math.min(field.max ?? Infinity, Math.max(field.min ?? -Infinity, raw));
+            // An increase stops at its ceiling and a decrease at its floor; a value already past the
+            // limit is left as it is rather than pulled back to it.
+            let limited = raw;
+            if (typeof action.limit === "number") {
+                if (op === "increase") limited = current >= action.limit ? current : Math.min(raw, action.limit);
+                if (op === "decrease") limited = current <= action.limit ? current : Math.max(raw, action.limit);
+            }
+            const clamped = Math.min(field.max ?? Infinity, Math.max(field.min ?? -Infinity, limited));
             next = field.kind === "percent" ? Math.round(clamped * 100) / 100 : Math.round(clamped);
             break;
         }
@@ -2882,6 +2892,35 @@ function ConfigPanel(props: any) {
                 return <input aria-label={field.label} style={{ ...compactInputStyle, flex: "1 1 140px" }} value={String(value ?? "")} onChange={e => setAction({ ...action, value: e.currentTarget.value })} />;
         }
     };
+    // The optional ceiling of an increase or floor of a decrease; empty means no limit.
+    const renderRuleActionLimit = (field: RuleActionField, action: RuleAction, setAction: (next: RuleAction) => void) => {
+        if (action.op !== "increase" && action.op !== "decrease") return null;
+        const isPercent = field.kind === "percent";
+        const shown = action.limit === undefined ? "" : String(isPercent ? Math.round(action.limit * 100) : action.limit);
+        const range = isPercent ? { min: 0, max: 100 } : { min: field.min, max: field.max };
+        return (
+            <label style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                {action.op === "increase" ? "but not above" : "but not below"}
+                <input
+                    aria-label={action.op === "increase" ? "Ceiling" : "Floor"}
+                    type="number"
+                    step={1}
+                    min={range.min}
+                    max={range.max}
+                    placeholder="no limit"
+                    style={{ ...compactInputStyle, width: "80px" }}
+                    value={shown}
+                    onChange={e => {
+                        const { limit: _previous, ...withoutLimit } = action;
+                        const text = e.currentTarget.value.trim();
+                        if (!text || !Number.isFinite(Number(text))) return setAction(withoutLimit);
+                        const entered = parseNumericInput(text, 0, range);
+                        setAction({ ...withoutLimit, limit: isPercent ? entered / 100 : Math.round(entered) });
+                    }}
+                />{isPercent && "%"}
+            </label>
+        );
+    };
     const renderRuleAction = (ruleIndex: number, ruleId: number, action: RuleAction, actionIndex: number) => {
         const field = ruleActionFields.find(candidate => candidate.target === action.target);
         const setAction = (next: RuleAction) => updateRuleAtIndex(ruleIndex, current => ({
@@ -2921,7 +2960,9 @@ function ConfigPanel(props: any) {
                         const choice = choices.find(candidate => `${candidate.field.target} ${candidate.op}` === e.currentTarget.value);
                         if (!choice) return;
                         const keepValue = choice.field.kind === field.kind && takesValue && ruleActionTakesValue(choice.field.kind, choice.op);
-                        setAction(keepValue ? { ...action, target: choice.field.target, op: choice.op } : keepTiming(createRuleAction(choice.field, choice.op)));
+                        // A limit belongs to one field and direction, so a new change starts without one.
+                        const { limit: _limit, ...withoutLimit } = action;
+                        setAction(keepValue ? { ...withoutLimit, target: choice.field.target, op: choice.op } : keepTiming(createRuleAction(choice.field, choice.op)));
                     }}>
                         {choices.map(choice => (
                             <option key={`${choice.field.target} ${choice.op}`} value={`${choice.field.target} ${choice.op}`}>{choice.label}</option>
@@ -2929,6 +2970,7 @@ function ConfigPanel(props: any) {
                     </select>
                 )}
                 {field && takesValue && renderRuleActionValue(field, action, setAction, durationInvalid)}
+                {field && takesValue && (field.kind === "percent" || field.kind === "number") && renderRuleActionLimit(field, action, setAction)}
                 {field && (
                     <button style={smallButtonStyle} aria-pressed={after} title="Before: the change already applies to the message that triggered it. After: it starts with the next message." onClick={() => setAction({ ...action, after_message: !after })}>
                         {after ? "Trigger after the message" : "Trigger before the message"}

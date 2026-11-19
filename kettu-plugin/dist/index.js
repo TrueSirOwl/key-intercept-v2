@@ -354,7 +354,14 @@ function applyRuleAction(config, action, nowMs) {
             if (typeof value !== "number" || !Number.isFinite(value)) break;
             const raw = op === "increase" ? current + value : op === "decrease" ? current - value : op === "set" ? value : NaN;
             if (Number.isNaN(raw)) break;
-            const clamped = Math.min(field.max ?? Infinity, Math.max(field.min ?? -Infinity, raw));
+            // An increase stops at its ceiling and a decrease at its floor; a value already past the
+            // limit is left as it is rather than pulled back to it.
+            let limited = raw;
+            if (typeof action.limit === "number") {
+                if (op === "increase") limited = current >= action.limit ? current : Math.min(raw, action.limit);
+                if (op === "decrease") limited = current <= action.limit ? current : Math.max(raw, action.limit);
+            }
+            const clamped = Math.min(field.max ?? Infinity, Math.max(field.min ?? -Infinity, limited));
             next = field.kind === "percent" ? Math.round(clamped * 100) / 100 : Math.round(clamped);
             break;
         }
@@ -589,7 +596,8 @@ function mergeRuleActions(raw) {
             target: action.target,
             op: action.op,
             value: typeof action.value === "number" || typeof action.value === "string" ? action.value : null,
-            ...(typeof action.after_message === "boolean" ? { after_message: action.after_message } : {})
+            ...(typeof action.after_message === "boolean" ? { after_message: action.after_message } : {}),
+            ...(typeof action.limit === "number" && Number.isFinite(action.limit) ? { limit: action.limit } : {})
         }));
 }
 
@@ -2878,6 +2886,29 @@ function ConfigPanel(props) {
                 return h(View, null, caption(field.label), textInput(String(action.value ?? ""), value => setAction({ ...action, value })));
         }
     };
+    // The optional ceiling of an increase or floor of a decrease; empty means no limit.
+    const renderRuleActionLimit = (field, action, setAction) => {
+        if (action.op !== "increase" && action.op !== "decrease") return null;
+        const isPercent = field.kind === "percent";
+        const shown = action.limit === undefined ? "" : String(isPercent ? Math.round(action.limit * 100) : action.limit);
+        const range = isPercent ? { min: 0, max: 100 } : { min: field.min, max: field.max };
+        return h(View, null,
+            h(Text, { style: { color: "#b5bac1", marginTop: 6 } }, `${action.op === "increase" ? "But not above" : "But not below"}${isPercent ? " (%)" : ""}, empty for no limit`),
+            h(TextInput, {
+                value: shown,
+                onChangeText: text => {
+                    const { limit: _previous, ...withoutLimit } = action;
+                    if (!text.trim() || !Number.isFinite(Number(text))) return setAction(withoutLimit);
+                    const entered = parseNumericInput(text, 0, range);
+                    setAction({ ...withoutLimit, limit: isPercent ? entered / 100 : Math.round(entered) });
+                },
+                placeholder: "no limit",
+                keyboardType: "numeric",
+                autoCapitalize: "none",
+                autoCorrect: false,
+                style: inputStyle
+            }));
+    };
     const renderRuleAction = (ruleIndex, ruleId, action, actionIndex) => {
         const field = ruleActionFields.find(candidate => candidate.target === action.target);
         const pickerKey = `${ruleId}-${actionIndex}`;
@@ -2909,10 +2940,13 @@ function ConfigPanel(props) {
             field ? button(currentChoice?.label ?? action.op, () => togglePicker("op"), { key: `${pickerKey}-op` }) : null,
             openActionPicker === `${pickerKey}:op` ? chipRow(`${pickerKey}-ops`, choices.map(choice => button(choice.label, () => {
                 const keepValue = choice.field.kind === field.kind && takesValue && ruleActionTakesValue(choice.field.kind, choice.op);
-                setAction(keepValue ? { ...action, target: choice.field.target, op: choice.op } : keepTiming(createRuleAction(choice.field, choice.op)));
+                // A limit belongs to one field and direction, so a new change starts without one.
+                const { limit: _limit, ...withoutLimit } = action;
+                setAction(keepValue ? { ...withoutLimit, target: choice.field.target, op: choice.op } : keepTiming(createRuleAction(choice.field, choice.op)));
                 setOpenActionPicker(null);
             }, { key: `${pickerKey}-op-${choice.field.target}-${choice.op}`, active: choice === currentChoice, noTopMargin: true }))) : null,
             field && takesValue ? renderRuleActionValue(field, action, setAction, pickerKey, durationInvalid) : null,
+            field && takesValue && (field.kind === "percent" || field.kind === "number") ? renderRuleActionLimit(field, action, setAction) : null,
             durationInvalid ? h(Text, { style: { color: "#f23f43", marginTop: 4 } }, "Use a duration like 30s, 5m, 1h 30m or 2d.") : null,
             field ? button(after ? "Trigger after the message" : "Trigger before the message", () => setAction({ ...action, after_message: !after }), { key: `${pickerKey}-timing` }) : null,
             field ? h(Text, { style: { color: "#b5bac1", marginTop: 4 } }, "Before: the change already applies to the message that triggered it. After: it starts with the next message.") : null,
