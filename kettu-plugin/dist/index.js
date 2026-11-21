@@ -298,6 +298,11 @@ function listRuleActionFields(config) {
 
     const groups = [...config.rules_groups].sort((a, b) => a.order - b.order);
     const groupLabel = group => group.name || `Group ${group.id}`;
+    // Getters and setters take the id as a parameter instead of closing over the loop variable:
+    // Hermes (Discord on phones) gives `const` in a loop one binding for all iterations, so a
+    // closure over `group` or `rule` would read the last one (every rule's chance read as the
+    // last rule's).
+    const getGroup = (groupId, key) => c => c.rules_groups.find(candidate => candidate.id === groupId)?.[key];
     const setGroup = (groupId, key) => (c, value) => ({
         ...c,
         rules_groups: c.rules_groups.map(group => (group.id === groupId ? { ...group, [key]: value } : group))
@@ -305,10 +310,10 @@ function listRuleActionFields(config) {
     for (const group of groups) {
         const entity = `group.${group.id}`;
         const entityLabel = `Group: ${truncateLabel(groupLabel(group), 40)}`;
-        const get = key => c => c.rules_groups.find(candidate => candidate.id === group.id)?.[key];
-        add(entity, entityLabel, "timer", "time", "timer", get("timeout_end"), setGroup(group.id, "timeout_end"));
-        add(entity, entityLabel, "enabled", "group", "switch", get("enabled"), setGroup(group.id, "enabled"));
+        add(entity, entityLabel, "timer", "time", "timer", getGroup(group.id, "timeout_end"), setGroup(group.id, "timeout_end"));
+        add(entity, entityLabel, "enabled", "group", "switch", getGroup(group.id, "enabled"), setGroup(group.id, "enabled"));
     }
+    const getRule = (ruleId, key) => c => c.rules.find(candidate => candidate.id === ruleId)?.[key];
     const setRule = (ruleId, key) => (c, value) => ({
         ...c,
         rules: c.rules.map(rule => (rule.id === ruleId ? { ...rule, [key]: value } : rule))
@@ -318,10 +323,9 @@ function listRuleActionFields(config) {
         for (const rule of groupRules) {
             const entity = `rule.${rule.id}`;
             const entityLabel = `Rule: ${truncateLabel(`${groupLabel(group)} › ${rule.rule_regex || "(empty regex)"}`, 50)}`;
-            const get = key => c => c.rules.find(candidate => candidate.id === rule.id)?.[key];
-            add(entity, entityLabel, "enabled", "rule", "switch", get("enabled"), setRule(rule.id, "enabled"));
-            add(entity, entityLabel, "chance", "chance", "percent", get("chance_to_apply"), setRule(rule.id, "chance_to_apply"), { min: 0, max: 1 });
-            add(entity, entityLabel, "replacement", "replacement", "text", get("rule_replacement"), setRule(rule.id, "rule_replacement"));
+            add(entity, entityLabel, "enabled", "rule", "switch", getRule(rule.id, "enabled"), setRule(rule.id, "enabled"));
+            add(entity, entityLabel, "chance", "chance", "percent", getRule(rule.id, "chance_to_apply"), setRule(rule.id, "chance_to_apply"), { min: 0, max: 1 });
+            add(entity, entityLabel, "replacement", "replacement", "text", getRule(rule.id, "rule_replacement"), setRule(rule.id, "rule_replacement"));
         }
     }
     return fields;
@@ -3808,8 +3812,19 @@ const profileConfigBadge = {
     }
 };
 
+// Kettu can load the plugin twice (seen on a phone: two copies, each patching sendMessage, changing
+// the message again and saving its own copy of the config). Only the newest copy stays active.
+const ACTIVE_COPY_KEY = "__keyInterceptKettuActiveCopy";
+const pluginCopy = {};
+
 const plugin = {
     onLoad: () => {
+        try {
+            globalThis[ACTIVE_COPY_KEY]?.unload?.();
+        } catch (err) {
+            console.log(`${LOG_PREFIX} stopping the previous copy failed`, err);
+        }
+        globalThis[ACTIVE_COPY_KEY] = { copy: pluginCopy, unload: () => plugin.onUnload() };
         findByProps = globalThis?.vendetta?.metro?.findByProps ?? null;
         ReactRef = globalThis?.vendetta?.metro?.common?.React ?? null;
         ReactNativeRef = globalThis?.vendetta?.metro?.common?.ReactNative ?? null;
@@ -3817,6 +3832,8 @@ const plugin = {
             throw new Error("Vendetta modules unavailable");
         }
         return bootstrapConfig().then(() => {
+            // A newer copy took over while this one was starting.
+            if (globalThis[ACTIVE_COPY_KEY]?.copy !== pluginCopy) return;
             startBackgroundMobileSyncWatcher();
             patchSendMessage();
             const profileActionRegistered = registerProfileActionFallback();
@@ -3830,6 +3847,7 @@ const plugin = {
         });
     },
     onUnload: () => {
+        if (globalThis[ACTIVE_COPY_KEY]?.copy === pluginCopy) globalThis[ACTIVE_COPY_KEY] = null;
         if (unpatchSendMessage) {
             unpatchSendMessage();
             unpatchSendMessage = null;

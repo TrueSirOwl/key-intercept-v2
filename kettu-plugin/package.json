@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
-    "test": "node ./test/react-compat.test.mjs && node ./test/normalized-string.test.mjs && node ./test/timeout.test.mjs && node ./test/group-name.test.mjs && node ./test/rule-actions.test.mjs && node ./test/mobile-sync.test.mjs",
+    "test": "node ./test/react-compat.test.mjs && node ./test/normalized-string.test.mjs && node ./test/timeout.test.mjs && node ./test/group-name.test.mjs && node ./test/rule-actions.test.mjs && node ./test/mobile-sync.test.mjs && node ./test/single-copy.test.mjs",
     "build": "node build.mjs --release-build",
     "build:developer": "node build.mjs --developer-build"
   },
