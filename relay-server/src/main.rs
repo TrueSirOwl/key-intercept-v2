@@ -52,8 +52,6 @@ struct AppState {
     peers: Arc<RwLock<HashMap<String, RegisteredPeer>>>,
     mobile_snapshots: Arc<RwLock<HashMap<String, MobileSnapshotRecord>>>,
     mobile_access_requests: Arc<RwLock<HashMap<String, Vec<AccessRequestRecord>>>>,
-    // Temporary: the latest diagnostic log a phone posted, per owner (in memory only).
-    mobile_diagnostics: Arc<RwLock<HashMap<String, Value>>>,
     desktop_requests: Arc<RwLock<HashMap<String, Vec<DesktopQueuedRequest>>>>,
     desktop_request_notifiers: Arc<RwLock<HashMap<String, Arc<Notify>>>>,
     desktop_waiters: Arc<RwLock<HashMap<u64, oneshot::Sender<DesktopCommandResponse>>>>,
@@ -347,10 +345,6 @@ async fn main() -> Result<()> {
         )
         .route("/users/:owner_id/mobile/sync", get(get_mobile_sync))
         .route(
-            "/users/:owner_id/mobile/diagnostics",
-            get(get_mobile_diagnostics).post(post_mobile_diagnostics),
-        )
-        .route(
             "/users/:owner_id/desktop/requests",
             get(pull_desktop_requests),
         )
@@ -364,7 +358,6 @@ async fn main() -> Result<()> {
             peers: Arc::new(RwLock::new(HashMap::new())),
             mobile_snapshots: Arc::new(RwLock::new(HashMap::new())),
             mobile_access_requests: Arc::new(RwLock::new(HashMap::new())),
-            mobile_diagnostics: Arc::new(RwLock::new(HashMap::new())),
             desktop_requests: Arc::new(RwLock::new(HashMap::new())),
             desktop_request_notifiers: Arc::new(RwLock::new(HashMap::new())),
             desktop_waiters: Arc::new(RwLock::new(HashMap::new())),
@@ -1147,28 +1140,6 @@ async fn upsert_mobile_snapshot(
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn post_mobile_diagnostics(
-    State(state): State<AppState>,
-    Path(owner_id): Path<String>,
-    Json(payload): Json<Value>,
-) -> impl IntoResponse {
-    if !is_discord_id(&owner_id) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    state.mobile_diagnostics.write().await.insert(owner_id, payload);
-    StatusCode::NO_CONTENT.into_response()
-}
-
-async fn get_mobile_diagnostics(
-    State(state): State<AppState>,
-    Path(owner_id): Path<String>,
-) -> impl IntoResponse {
-    match state.mobile_diagnostics.read().await.get(&owner_id) {
-        Some(payload) => Json(payload.clone()).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
 async fn get_mobile_sync(
     State(state): State<AppState>,
     Path(owner_id): Path<String>,
@@ -1644,7 +1615,6 @@ mod tests {
             peers: Arc::new(RwLock::new(HashMap::new())),
             mobile_snapshots: Arc::new(RwLock::new(HashMap::new())),
             mobile_access_requests: Arc::new(RwLock::new(HashMap::new())),
-            mobile_diagnostics: Arc::new(RwLock::new(HashMap::new())),
             desktop_requests: Arc::new(RwLock::new(HashMap::new())),
             desktop_request_notifiers: Arc::new(RwLock::new(HashMap::new())),
             desktop_waiters: Arc::new(RwLock::new(HashMap::new())),
