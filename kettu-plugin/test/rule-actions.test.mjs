@@ -29,6 +29,10 @@ const harness = new Function(`
     const validateDiscordId = value => /^[0-9]+$/.test(value);
     function readLocalConfig() { return mergeLocalConfig(stored); }
     function saveLocalConfig(ownerId, config) { stored = config; interceptConfig = mergeLocalConfig(config); return Promise.resolve(interceptConfig); }
+    // The relay pull before saving: brings in an edit made elsewhere, if one is waiting.
+    let relayEdit = null;
+    const currentRelayUrl = () => "";
+    function syncInAppLoopback() { if (relayEdit) { stored = relayEdit; relayEdit = null; } return Promise.resolve(null); }
     ${body}
     return {
         mergeLocalConfig, applyRuleAction, applyRules, applyHeldRuleActions, withoutDanglingRuleActions, parseDuration,
@@ -36,6 +40,7 @@ const harness = new Function(`
         get config() { return interceptConfig; },
         get stored() { return stored; },
         setStored(config) { stored = config; },
+        setRelayEdit(config) { relayEdit = config; },
         saved: () => ruleActionSaveQueue
     };
 `)();
@@ -171,6 +176,27 @@ assert.equal(harness.parseDuration("5 minutes"), null);
     assert.equal(saved.rules_groups.find(group => group.id === 2).enabled, true, "the enabled group was saved");
     assert.equal(saved.rules.find(rule => rule.id === 2).enabled, false, "the self-disabled rule was saved");
     assert.equal(saved.drone_config.drone_term, "Unit", "the remote edit made meanwhile was kept");
+}
+
+// Two rules lowering the same rule's chance add up, also when an edit from elsewhere waits on the relay.
+{
+    const config = {
+        rules_groups: [{ id: 1, name: "Triggers", enabled: true, timeout_end: farFuture, order: 0 }],
+        rules: [
+            { id: 1, rule_regex: "aaa", rule_replacement: "$&", chance_to_apply: 1, order: 0, group_id: 1, actions: [{ target: "rule.3.chance", op: "decrease", value: 0.3 }] },
+            { id: 2, rule_regex: "bbb", rule_replacement: "$&", chance_to_apply: 1, order: 1, group_id: 1, actions: [{ target: "rule.3.chance", op: "decrease", value: 0.2 }] },
+            { id: 3, rule_regex: "zzz", rule_replacement: "$&", chance_to_apply: 1, order: 2, group_id: 1, actions: [] }
+        ]
+    };
+    harness.load(config);
+    harness.setRelayEdit({ ...config, drone_config: { drone_term: "Unit" } });
+    harness.applyRules("aaa"); harness.applyHeldRuleActions();
+    await harness.saved();
+    harness.applyRules("bbb"); harness.applyHeldRuleActions();
+    await harness.saved();
+    const saved = harness.mergeLocalConfig(harness.stored);
+    assert.equal(saved.rules.find(rule => rule.id === 3).chance_to_apply, 0.5, "100% - 30% - 20%");
+    assert.equal(saved.drone_config.drone_term, "Unit", "an edit waiting on the relay is pulled before saving, not uploaded over");
 }
 
 // Each action can choose to trigger before the message (already changing it) or after it.

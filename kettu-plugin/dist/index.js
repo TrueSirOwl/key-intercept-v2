@@ -463,7 +463,10 @@ function saveFiredRuleActions() {
     if (!pendingRuleActions.length || !validateDiscordId(ownerId)) return Promise.resolve();
     const fired = pendingRuleActions;
     pendingRuleActions = [];
-    return saveLocalConfig(ownerId, applyFiredRuleActions(readLocalConfig(ownerId), fired)).then(() => {
+    // Pull remote edits first, so the changes build on them instead of uploading over them.
+    return syncInAppLoopback(currentRelayUrl(), ownerId).catch(() => null).then(
+        () => saveLocalConfig(ownerId, applyFiredRuleActions(readLocalConfig(ownerId), fired))
+    ).then(() => {
         // saveLocalConfig reloaded interceptConfig from the saved config; keep what fired since.
         interceptConfig = applyFiredRuleActions(interceptConfig, pendingRuleActions);
     });
@@ -980,35 +983,25 @@ function syncInAppLoopback(relayUrl, ownerId) {
         }
         if (!response.ok) throw new Error(`Mobile relay sync failed: ${response.status}`);
         return response.json().then(payload => {
-            const relayRevision = Number.isFinite(payload.revision) ? payload.revision : local.revision;
-            const nextAllowedEditors = Array.isArray(payload.allowed_editors) ? payload.allowed_editors : local.allowed_editors;
-            const normalizedLocalEditors = Array.isArray(local.allowed_editors) ? local.allowed_editors.filter(validateDiscordId).sort() : [];
-            const normalizedRelayEditors = nextAllowedEditors.filter(validateDiscordId).sort();
-            const editorsChanged = normalizedRelayEditors.length !== normalizedLocalEditors.length
-                || normalizedRelayEditors.some((value, index) => value !== normalizedLocalEditors[index]);
-            const mergedLocalConfig = mergeLocalConfig(local.config);
-            const mergedRelayConfig = mergeLocalConfig(payload.config);
-            const configChanged = JSON.stringify(mergedRelayConfig) !== JSON.stringify(mergedLocalConfig);
-            if (relayRevision <= local.revision && !editorsChanged && !configChanged) {
-                debugLog("syncInAppLoopback:no_change", { ownerId, relayRevision, localRevision: local.revision });
+            // Compare with the state as it is now, not as it was when the request went out: a save
+            // (e.g. from a rule action) may have written and uploaded a newer state meanwhile, and the
+            // relay copy must not overwrite it. Every change on the relay (remote edits, approved
+            // editors) raises its revision, so only a higher one is newer.
+            const current = readMobileState(ownerId);
+            const relayRevision = Number.isFinite(payload.revision) ? payload.revision : current.revision;
+            if (relayRevision <= current.revision) {
+                debugLog("syncInAppLoopback:no_change", { ownerId, relayRevision, localRevision: current.revision });
                 return;
             }
 
-            const shouldApplyRelayConfig = relayRevision > local.revision || configChanged;
             writeMobileState({
                 owner_discord_id: ownerId,
-                config: shouldApplyRelayConfig ? mergedRelayConfig : mergedLocalConfig,
-                allowed_editors: nextAllowedEditors,
-                revision: Math.max(local.revision, relayRevision),
+                config: mergeLocalConfig(payload.config),
+                allowed_editors: Array.isArray(payload.allowed_editors) ? payload.allowed_editors : current.allowed_editors,
+                revision: relayRevision,
                 last_writer_id: typeof payload.last_writer_id === "string" ? payload.last_writer_id : ownerId
             });
-            debugLog("syncInAppLoopback:applied", {
-                ownerId,
-                relayRevision,
-                localRevision: local.revision,
-                editorsChanged,
-                configChanged
-            });
+            debugLog("syncInAppLoopback:applied", { ownerId, relayRevision, localRevision: current.revision });
             return payload;
         });
     });
