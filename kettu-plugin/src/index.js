@@ -416,6 +416,42 @@ function applyFiredRuleActions(config, fired) {
     return fired.reduce((next, { action, nowMs }) => applyRuleAction(next, action, nowMs), config);
 }
 
+// Temporary diagnostics: a short log of rule action saves and storage writes, posted to the relay
+// (GET <relay>/users/<id>/mobile/diagnostics) to find out why a phone's saves start from an old value.
+// `i` tells apart copies of the plugin running at the same time.
+const diagInstanceId = Math.random().toString(36).slice(2, 8);
+const diagEvents = [];
+function diagValues(config, targets) {
+    try {
+        const fields = listRuleActionFields(config);
+        return Object.fromEntries(targets.map(target => [target, fields.find(field => field.target === target)?.get(config)]));
+    } catch (err) {
+        return { error: String(err) };
+    }
+}
+function diagChances(config) {
+    try {
+        return (config?.rules ?? []).map(rule => `${rule.id}:${rule.chance_to_apply}`).join(" ");
+    } catch (err) {
+        return String(err);
+    }
+}
+function diag(event, data) {
+    diagEvents.push({ t: Date.now(), i: diagInstanceId, e: event, ...data });
+    if (diagEvents.length > 80) diagEvents.shift();
+}
+// Never lets a failure reach the save it reports on.
+function postDiagnostics(ownerId) {
+    try {
+        if (!validateDiscordId(ownerId)) return;
+        fetch(`${relayBaseUrl(currentRelayUrl())}/users/${ownerId}/mobile/diagnostics`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ instance: diagInstanceId, posted: Date.now(), events: diagEvents })
+        }).catch(() => null);
+    } catch {}
+}
+
 // Fired while sending and not saved yet. Saving applies them to the freshly loaded config rather
 // than writing a snapshot, so edits that reached the config in the meantime (e.g. from a remote
 // editor) survive.
@@ -450,7 +486,10 @@ function applyHeldRuleActions() {
 
 function commitRuleActions(fired) {
     if (!fired.length) return;
+    const diagTargets = fired.map(({ action }) => action.target);
+    const memBefore = diagValues(interceptConfig, diagTargets);
     interceptConfig = applyFiredRuleActions(interceptConfig, fired);
+    diag("fire", { actions: fired.map(({ action }) => `${action.target} ${action.op} ${action.value}`), memBefore, memAfter: diagValues(interceptConfig, diagTargets) });
     pendingRuleActions.push(...fired);
     ruleActionSaveQueue = ruleActionSaveQueue
         .then(saveFiredRuleActions)
@@ -464,12 +503,24 @@ function saveFiredRuleActions() {
     const fired = pendingRuleActions;
     pendingRuleActions = [];
     // Pull remote edits first, so the changes build on them instead of uploading over them.
-    return syncInAppLoopback(currentRelayUrl(), ownerId).catch(() => null).then(
-        () => saveLocalConfig(ownerId, applyFiredRuleActions(readLocalConfig(ownerId), fired))
-    ).then(() => {
+    return syncInAppLoopback(currentRelayUrl(), ownerId).catch(err => {
+        diag("save-sync-failed", { error: String(err) });
+        return null;
+    }).then(() => {
+        const diagTargets = fired.map(({ action }) => action.target);
+        const base = readLocalConfig(ownerId);
+        const next = applyFiredRuleActions(base, fired);
+        try {
+            diag("save", { rev: readMobileState(ownerId).revision, base: diagValues(base, diagTargets), result: diagValues(next, diagTargets) });
+        } catch {}
+        return saveLocalConfig(ownerId, next);
+    }).then(() => {
         // saveLocalConfig reloaded interceptConfig from the saved config; keep what fired since.
         interceptConfig = applyFiredRuleActions(interceptConfig, pendingRuleActions);
-    });
+    }, err => {
+        diag("save-failed", { error: String(err) });
+        throw err;
+    }).finally(() => postDiagnostics(ownerId));
 }
 
 function NormalizedString(str) {
@@ -939,11 +990,28 @@ function writeMobileState(state) {
     };
     fallbackMobileStateByOwner.set(state.owner_discord_id, normalized);
     if (storage) storage.setItem(key, JSON.stringify(normalized));
+    let readBack;
+    try {
+        const raw = storage?.getItem(key);
+        readBack = raw === JSON.stringify(normalized) ? "same" : (raw ? `differs (rev ${JSON.parse(raw).revision})` : "empty");
+    } catch (err) {
+        readBack = `error ${String(err)}`;
+    }
+    let backend = "none";
+    try {
+        backend = !storage ? "none" : storage === globalThis?.window?.localStorage ? "localStorage" : storage.__raw === cachedMMKVStore ? "mmkv" : "plugin-storage";
+    } catch {}
+    diag("write", { rev: normalized.revision, writer: normalized.last_writer_id, backend, readBack, chances: diagChances(normalized.config) });
     return normalized;
 }
 
 function uploadMobileSnapshot(relayUrl, ownerId) {
     const state = readMobileState(ownerId);
+    // Repeated uploads of the same revision (the background re-upload every 2.5s) count up in one entry.
+    const lastDiag = diagEvents[diagEvents.length - 1];
+    const chances = diagChances(state.config);
+    if (lastDiag?.e === "upload" && lastDiag.i === diagInstanceId && lastDiag.rev === state.revision && lastDiag.chances === chances) lastDiag.n += 1;
+    else diag("upload", { rev: state.revision, chances, n: 1 });
     debugLog("uploadMobileSnapshot:start", { ownerId, revision: state.revision, relayUrl: relayBaseUrl(relayUrl) });
     return fetch(`${relayBaseUrl(relayUrl)}/users/${ownerId}/mobile/snapshot`, {
         method: "POST",
@@ -1002,6 +1070,9 @@ function syncInAppLoopback(relayUrl, ownerId) {
                 last_writer_id: typeof payload.last_writer_id === "string" ? payload.last_writer_id : ownerId
             });
             debugLog("syncInAppLoopback:applied", { ownerId, relayRevision, localRevision: current.revision });
+            try {
+                diag("adopt", { from: current.revision, to: relayRevision, writer: payload.last_writer_id, chances: diagChances(payload.config) });
+            } catch {}
             return payload;
         });
     });
