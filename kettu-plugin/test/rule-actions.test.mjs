@@ -22,7 +22,7 @@ const body = [
 ].join("\n");
 
 // Stand-ins for the phone's config store: `stored` is what it holds, saveLocalConfig reloads like the real one.
-const harness = new Function(`
+const makeHarness = source => new Function(`
     const LOG_PREFIX = "[test]";
     let stored;
     const resolveSessionUserId = () => "1";
@@ -33,7 +33,7 @@ const harness = new Function(`
     let relayEdit = null;
     const currentRelayUrl = () => "";
     function syncInAppLoopback() { if (relayEdit) { stored = relayEdit; relayEdit = null; } return Promise.resolve(null); }
-    ${body}
+    ${source}
     return {
         mergeLocalConfig, applyRuleAction, applyRules, applyHeldRuleActions, withoutDanglingRuleActions, parseDuration,
         load(config) { stored = config; interceptConfig = mergeLocalConfig(config); },
@@ -44,6 +44,9 @@ const harness = new Function(`
         saved: () => ruleActionSaveQueue
     };
 `)();
+const harness = makeHarness(body);
+// Hermes (Discord on phones) gives `const`/`let` in a loop one binding for all iterations, like `var`.
+const hermesHarness = makeHarness(body.replace(/\b(const|let)\s/g, "var "));
 
 const now = Date.parse("2026-11-07T12:00:00.000Z");
 const iso = ms => new Date(ms).toISOString();
@@ -239,6 +242,30 @@ assert.equal(harness.parseDuration("5 minutes"), null);
     }).rules[0].actions;
     assert.equal(limits[0].limit, 0.6, "a limit survives loading");
     assert.equal("limit" in limits[1], false, "a malformed limit is dropped");
+}
+
+// On Hermes, a decrease must start from the target rule's own chance, not from another rule's
+// (getters used to close over the loop variable and read the last rule's chance).
+{
+    const config = {
+        rules_groups: [
+            { id: 1, name: "Triggers", enabled: true, timeout_end: farFuture, order: 1 },
+            { id: 2, name: "Other", enabled: true, timeout_end: farFuture, order: 1 }
+        ],
+        rules: [
+            { id: 6, rule_regex: "zzz", rule_replacement: "$&", chance_to_apply: 1, order: 0, group_id: 1, actions: [] },
+            { id: 1, rule_regex: "aaa", rule_replacement: "$&", chance_to_apply: 1, order: 1, group_id: 1, actions: [{ target: "rule.6.chance", op: "decrease", value: 0.2, limit: 0.01 }] },
+            { id: 12, rule_regex: "never", rule_replacement: "$&", chance_to_apply: 1, enabled: false, order: 0, group_id: 2, actions: [] }
+        ]
+    };
+    hermesHarness.load(config);
+    for (const expected of [0.8, 0.6, 0.4]) {
+        hermesHarness.applyRules("aaa");
+        hermesHarness.applyHeldRuleActions();
+        await hermesHarness.saved();
+        const chance = hermesHarness.mergeLocalConfig(hermesHarness.stored).rules.find(rule => rule.id === 6).chance_to_apply;
+        assert.equal(chance, expected, "each decrease starts from rule 6's current chance");
+    }
 }
 
 console.log("rule actions test passed");
