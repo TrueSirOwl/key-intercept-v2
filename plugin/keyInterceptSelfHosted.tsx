@@ -388,6 +388,46 @@ function mergeLocalConfig(raw: unknown): LocalConfig {
     };
 }
 
+// Three-way merge of an edited config onto a newer one: what the editor changed since `base` wins,
+// everything else comes from `theirs` (so changes made elsewhere meanwhile, e.g. by rule actions,
+// survive). Objects merge per key; lists of items with an id (rules, groups) per item; any other
+// value or list is one unit, and when both sides changed it, the edit wins.
+function mergeConfigEdits(base: unknown, mine: unknown, theirs: unknown): unknown {
+    const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+    if (same(mine, base)) return theirs;
+    if (same(theirs, base) || same(mine, theirs)) return mine;
+    const isRecord = (value: unknown): value is Record<string, unknown> =>
+        !!value && typeof value === "object" && !Array.isArray(value);
+    const hasIds = (value: unknown): value is { id: number; }[] =>
+        Array.isArray(value) && value.every(item => isRecord(item) && typeof item.id === "number");
+    if (isRecord(base) && isRecord(mine) && isRecord(theirs)) {
+        const merged: Record<string, unknown> = {};
+        for (const key of new Set([...Object.keys(theirs), ...Object.keys(mine)])) {
+            const value = mergeConfigEdits(base[key], mine[key], theirs[key]);
+            if (value !== undefined) merged[key] = value;
+        }
+        return merged;
+    }
+    if (hasIds(base) && hasIds(mine) && hasIds(theirs)) {
+        const byId = (items: { id: number; }[]) => new Map(items.map(item => [item.id, item]));
+        const baseItems = byId(base);
+        const theirItems = byId(theirs);
+        const merged: unknown[] = [];
+        for (const item of mine) {
+            const value = mergeConfigEdits(baseItems.get(item.id), item, theirItems.get(item.id));
+            // Removed elsewhere and not changed here: stays removed.
+            if (value !== undefined) merged.push(value);
+        }
+        const mineIds = new Set(mine.map(item => item.id));
+        for (const item of theirs) {
+            // Added elsewhere; one that is in `base` but not in `mine` was removed here.
+            if (!mineIds.has(item.id) && !baseItems.has(item.id)) merged.push(item);
+        }
+        return merged;
+    }
+    return mine;
+}
+
 function getPetWordsForType(petType: number, fallback: string[] = []): string[] {
     return petWordsByType[petType] ?? fallback;
 }
@@ -791,7 +831,7 @@ async function pushRemoteConfig(
     config: LocalConfig,
     expectedRevision?: number,
     source: "auto" | "pc" | "mobile" = "auto"
-) {
+): Promise<number | null> {
     const normalizedEditorId = normalizeDiscordId(editorId);
     const normalizedTargetUserId = normalizeDiscordId(targetUserId);
     if (!normalizedEditorId || !normalizedTargetUserId) {
@@ -817,6 +857,9 @@ async function pushRemoteConfig(
         const detail = payload?.error ? ` (${String(payload.error)})` : "";
         throw new Error(`Relay update failed: ${response.status}${detail}`);
     }
+    // A phone's snapshot answers with its new revision; a PC answers without a body.
+    const payload = await response.json().catch(() => null) as { revision?: unknown } | null;
+    return typeof payload?.revision === "number" ? payload.revision : null;
 }
 
 function deriveRelayConfigReadStatus(status: number, payload: unknown): number {
@@ -865,7 +908,7 @@ async function readRemoteConfig(
     requesterId: string,
     targetUserId: string,
     source: "auto" | "pc" | "mobile" = "auto"
-): Promise<LocalConfig> {
+): Promise<{ config: LocalConfig; revision: number | null; }> {
     const normalizedRequesterId = normalizeDiscordId(requesterId);
     const normalizedTargetUserId = normalizeDiscordId(targetUserId);
     if (!normalizedRequesterId || !normalizedTargetUserId) {
@@ -908,13 +951,45 @@ async function readRemoteConfig(
         err.status = status;
         throw err;
     }
-    const payload = mergeLocalConfig(await response.json());
+    const body = await response.json();
+    const payload = mergeLocalConfig(body);
+    // Only a phone's snapshot has a revision the relay checks on save; a PC's is reported as 0.
+    const revision = body?.source === "mobile" && typeof body.revision === "number" ? body.revision : null;
     console.info(`${LOG_PREFIX} readRemoteConfig:success`, {
         requesterId: normalizedRequesterId,
         targetUserId: normalizedTargetUserId,
+        revision,
         summary: configLogSummary(payload)
     });
-    return payload;
+    return { config: payload, revision };
+}
+
+// What the editor knows of a remote config: `base` is what its current edits started from,
+// `config` and `revision` the latest version seen on the relay (revision null: not checked).
+type RemoteConfigState = { userId: string; base: LocalConfig; config: LocalConfig; revision: number | null; };
+
+// Saves an edit to someone else's config. With a known revision the relay refuses the save if the
+// config changed meanwhile (say a rule action on their phone); the edit is then merged onto the
+// newer version and saved again, so neither side's change is lost.
+async function pushRemoteConfigEdits(
+    relayUrl: string,
+    editorId: string,
+    edited: LocalConfig,
+    known: RemoteConfigState,
+    source: "auto" | "pc" | "mobile"
+): Promise<RemoteConfigState> {
+    let latest = known;
+    for (let attempt = 1; ; attempt++) {
+        const config = withoutDanglingRuleActions(mergeLocalConfig(mergeConfigEdits(latest.base, edited, latest.config)));
+        try {
+            const revision = await pushRemoteConfig(relayUrl, editorId, known.userId, config, latest.revision ?? undefined, source);
+            return { userId: known.userId, base: edited, config, revision };
+        } catch (err) {
+            if (parseErrorStatusCode(err) !== 409 || latest.revision === null || attempt >= 3) throw err;
+            const fresh = await readRemoteConfig(relayUrl, editorId, known.userId, source);
+            latest = { ...latest, config: fresh.config, revision: fresh.revision };
+        }
+    }
 }
 
 async function requestRemoteAccess(relayUrl: string, requesterId: string, targetUserId: string) {
@@ -2246,6 +2321,7 @@ function ConfigPanel(props: any) {
     const skipAutosaveRef = React.useRef(true);
     const lastSavedSnapshotRef = React.useRef("");
     const saveQueueRef = React.useRef(Promise.resolve());
+    const remoteStateRef = React.useRef<RemoteConfigState | null>(null);
     const refreshInFlightRef = React.useRef(false);
     // Snapshot of what the editor currently shows. Async loads/saves compare against it so a
     // result that lands after the user kept typing doesn't overwrite the newer edits.
@@ -2331,7 +2407,7 @@ function ConfigPanel(props: any) {
                 return;
             }
 
-            let remote: LocalConfig;
+            let remote: { config: LocalConfig; revision: number | null; };
             try {
                 remote = await readRemoteConfig(settings.store.relayUrl, activeUserId, profileUserId, "mobile");
                 remoteSourceRef.current = "mobile";
@@ -2341,13 +2417,16 @@ function ConfigPanel(props: any) {
                 remote = await readRemoteConfig(settings.store.relayUrl, activeUserId, profileUserId, "auto");
                 remoteSourceRef.current = "auto";
             }
-            if (!editedSinceStart()) updateFromConfig(remote);
+            if (!editedSinceStart()) {
+                updateFromConfig(remote.config);
+                remoteStateRef.current = { userId: profileUserId, base: remote.config, config: remote.config, revision: remote.revision };
+            }
             setCanViewRemote(true);
             console.info(`${LOG_PREFIX} refresh:success`, {
                 activeUserId,
                 profileUserId,
                 isOwnProfile,
-                summary: configLogSummary(remote)
+                summary: configLogSummary(remote.config)
             });
         } catch (err) {
             setCanViewRemote(false);
@@ -2584,12 +2663,16 @@ function ConfigPanel(props: any) {
             if (editorSnapshotRef.current === JSON.stringify(mergedConfig)) updateFromConfig(appliedConfig);
             if (!options?.quiet) setStatus("Auto-saved local config");
         } else {
-            await pushRemoteConfig(
+            // Without a loaded version of this profile (none read yet) it saves unchecked, as before.
+            const known = remoteStateRef.current?.userId === profileUserId
+                ? remoteStateRef.current
+                : { userId: profileUserId, base: mergedConfig, config: mergedConfig, revision: null };
+            // A merged result reaches the editor with the next refresh.
+            remoteStateRef.current = await pushRemoteConfigEdits(
                 settings.store.relayUrl,
                 activeUserId,
-                profileUserId,
                 mergedConfig,
-                undefined,
+                known,
                 remoteSourceRef.current
             );
             if (!options?.quiet) setStatus(`Auto-saved ${profileUserId}'s config via relay`);

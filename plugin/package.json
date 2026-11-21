@@ -5,7 +5,7 @@
   "main": "keyInterceptSelfHosted.tsx",
   "type": "module",
   "scripts": {
-    "test": "node ./test/smoke.test.mjs && node --no-warnings ./test/normalized-string.test.mjs && node --no-warnings ./test/timeout.test.mjs && node --no-warnings ./test/rule-actions.test.mjs && node --no-warnings ./test/relay-setting.test.mjs"
+    "test": "node ./test/smoke.test.mjs && node --no-warnings ./test/normalized-string.test.mjs && node --no-warnings ./test/timeout.test.mjs && node --no-warnings ./test/rule-actions.test.mjs && node --no-warnings ./test/relay-setting.test.mjs && node --no-warnings ./test/remote-edit.test.mjs"
   },
   "license": "MIT"
 }
